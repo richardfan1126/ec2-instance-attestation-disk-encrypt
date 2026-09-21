@@ -8,15 +8,24 @@ the bootstrap key so that only the TPM-sealed keyslot remains. Enrollment SHALL 
 performed by a systemd unit baked into the immutable image (there is no cloud-init
 or user-data). The unit SHALL be idempotent: it runs on every boot but reformats
 only a volume that has no LUKS header, so an already-provisioned volume is never
-destroyed.
+destroyed. Before sealing on a fresh volume, the unit SHALL verify that the live PCR12
+is all-zeros and SHALL refuse to enroll otherwise, so it never seals to a first boot
+that already carries an injected kernel cmdline.
 
 #### Scenario: Fresh data volume is provisioned
 
 - **WHEN** the enrollment unit runs and the target data volume has no LUKS header
+- **AND** the live PCR12 is all-zeros
 - **THEN** the volume is formatted as LUKS2 with a random bootstrap key
 - **AND** a TPM2 keyslot sealed to PCR4 + PCR12 is enrolled via `systemd-cryptenroll`
 - **AND** the bootstrap key is removed, leaving only the TPM-sealed keyslot
 - **AND** the volume is unlocked and mounted at `/mnt/data`
+
+#### Scenario: Enrollment refused when first boot carries an injected cmdline
+
+- **WHEN** the enrollment unit runs on a fresh volume and the live PCR12 is not all-zeros
+- **THEN** no LUKS format or TPM enrollment is performed
+- **AND** the volume is left unprovisioned so a tampered first boot is never sealed
 
 #### Scenario: Already-provisioned volume is left untouched
 

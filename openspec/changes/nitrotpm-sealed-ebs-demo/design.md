@@ -111,6 +111,60 @@ reboot — a real boot-path tamper; (b) always available without reboot,
 `cryptsetup close` then `tpm2_pcrextend 12:...` then `cryptsetup open` fails. Both
 isolate the cmdline gate with no false-positive risk.
 
+**Automate the build with a two-job GitHub Actions pipeline (mirror the reference).**
+KIWI needs privilege, and `.raw` -> AMI needs AWS — two different environments, so
+two jobs. Job 1 (`build-and-publish`) builds the `.raw` inside a Docker
+`kiwi-builder` on the runner, extracts the reference PCRs, and publishes a
+digest-pinned OCI artifact to GHCR (ORAS, pinned + checksum-verified) plus a SLSA
+build-provenance attestation. Job 2 (`build-ami`, `needs` job 1) authenticates via
+OIDC and turns the artifact into a registered AMI. This matches AWS's separation and
+gives a reproducible, attestable supply chain end to end.
+
+**Extract PCR4 + PCR12, not PCR4 + PCR7.**
+The reference tracks PCR7 (Secure Boot). Our gate is PCR4 + PCR12 (Secure Boot off),
+so the extraction step reads those from `pcr_measurements.json` and **fails the build
+if PCR12 is missing** — which doubles as the guard that the bundled
+`nitro-tpm-pcr-compute` is >= 1.1.0.
+
+**Raw -> AMI via an ephemeral Terraform builder instance (Path A).**
+`register-image` needs the bits as an EBS snapshot. Path A provisions a throwaway
+instance, `dd`s the `.raw` onto an attached volume, snapshots it, and calls
+`register-image --boot-mode uefi --tpm-support v2.0`, then always `terraform destroy`s.
+Chosen over `import-snapshot` (Path B) because it is proven for NitroTPM/UEFI and
+fully controllable; Path B's raw+UEFI+`tpm-support` import path is unverified.
+
+**Reference PCRs are a verification anchor, not a seal input.**
+`pcr_measurements.json` (build-time PCR4 + PCR12) is used by a human to confirm a
+running instance measured to the AMI that was built, and to predict the tamper delta.
+It is deliberately **not** fed into the seal: `systemd-cryptenroll` binds to the PCRs
+that are live at first-boot enroll time. Enforcing the reference PCR4 locally is
+impossible without circularity — PCR4 = hash(UKI), the UKI cmdline embeds the
+dm-verity roothash, and the roothash covers every block of the erofs root, so any file
+baked in that contains PCR4 changes the roothash and therefore PCR4 (chicken-and-egg).
+Placing it on the ESP instead makes it mutable and unmeasured, so it could not be an
+enforcement anchor anyway. First-boot PCR4 trust therefore rests on immutability +
+dm-verity + launching a chosen attestable AMI id, which is acceptable for this demo.
+This differs from the KMS reference, where the reference PCR is load-bearing (baked
+into the KMS key policy so KMS enforces it).
+
+**Guard first-boot enrollment with a live PCR12 == all-zeros check.**
+Unlike PCR4, PCR12's good value is a known constant (all-zeros) independent of the
+build, so it is enforceable at enroll time with no baked file, no network, and no
+circularity. The enroll script reads live PCR12 and refuses to seal if it is non-zero,
+closing the first-boot TOFU gap where the very first boot already carries an injected
+cmdline. The cmdline vector we added PCR12 for is thus guarded at enroll time as well
+as at unlock time.
+
+**Supply-chain hardening kept from the reference.**
+OIDC role-to-assume (no static AWS keys), every action pinned by commit SHA,
+least-privilege `permissions` per job, digest-pinned artifact references (no
+tag-movement TOCTOU), and expected-workflow verification when pulling the artifact in
+job 2.
+
+**Drop the `enable_ssh` debug toggle.**
+The reference's SSH debug build directly contradicts our zero-operator-access image,
+so it is omitted rather than carried as a disabled escape hatch.
+
 ## Risks / Trade-offs
 
 - **KIWI-NG build complexity / scope increase** → Building the AMI is heavier than
@@ -128,6 +182,12 @@ isolate the cmdline gate with no false-positive risk.
   disables integrity while PCR4 stays constant (AWS GHSA-xrv8-2pf5-f3q7). Mitigated by
   binding PCR12 as well; requires `nitro-tpm-pcr-compute` >= 1.1.0 to emit the PCR12
   reference (default all-zeros).
+- **CI builder-instance leak** → Job 2 provisions a real EC2 instance; a failed
+  `terraform destroy` leaves it (and its cost) running. Mitigated by `if: always()`
+  cleanup and least-privilege; the README notes manual-cleanup as the fallback.
+- **CI scope/cost** → A privileged Docker build plus an EC2 builder instance per run
+  is heavier than the rest of the demo. Accepted because the user chose the full
+  pipeline; documented as a prerequisite (GHCR, OIDC role, Terraform).
 - **Device naming drift** (`/dev/nvme1n1` vs `/dev/xvdb`) → Reference the data volume
   by a stable local identifier (`/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol...`),
   never a runtime AWS/IMDS lookup (that would put the network on the unlock path).
@@ -153,3 +213,8 @@ deleting the data volume, and deregistering the AMI / deleting its snapshot.
   bundled rpm version is still to check on the builder.]
 - Whether the ESP is writable at runtime on this immutable image (decides if the
   boot-path cmdline-addon tamper is possible, or only the `tpm2_pcrextend` demo).
+- Builder instance type/size for Path A (the reference uses `c5.9xlarge` for a larger
+  image; ours is smaller — right-size during implementation).
+- If Path A ever proves too heavy, confirm whether `import-snapshot` + our own
+  `register-image --tpm-support v2.0` (Path B) supports the raw+UEFI path before
+  switching.

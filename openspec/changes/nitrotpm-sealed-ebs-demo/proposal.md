@@ -38,10 +38,24 @@ the cloud-init/user-data trigger entirely.
   `--boot-mode uefi --tpm-support v2.0`, launch with a data volume, reboot ->
   auto-unlock, then append a kernel cmdline on the same instance -> PCR12 changes ->
   unseal fails -> volume stays locked.
+- Add a GitHub Actions pipeline that builds the AMI automatically (two jobs):
+  - **Build + publish:** build the KIWI `.raw` inside a privileged Docker
+    `kiwi-builder` on the runner, extract the reference **PCR4 + PCR12** from
+    `pcr_measurements.json` (failing the build if PCR12 is absent), then publish the
+    raw image + measurements to GHCR as a digest-pinned OCI artifact (ORAS, pinned +
+    checksum-verified) and generate a SLSA build-provenance attestation
+    (`actions/attest`, pushed to the registry).
+  - **Build AMI:** authenticate to AWS via OIDC (`role-to-assume`, no static keys),
+    provision an ephemeral Terraform-managed builder instance, pull the OCI artifact
+    (verifying the expected workflow), convert `.raw` -> EBS snapshot ->
+    `register-image --boot-mode uefi --tpm-support v2.0`, emit the AMI id, and always
+    tear the builder down.
+  - Pin every action by commit SHA; scope `permissions` per job.
 
 **Non-goals (explicit):** AWS KMS or any remote key escrow; a recovery/passphrase
 keyslot (data loss is acceptable); surviving stop/start (reboot survival only);
-per-fleet or signed-PCR (PCR7) semantics.
+per-fleet or signed-PCR (PCR7) semantics; an SSH / debug build path (the image is
+zero-operator-access by design).
 
 ## Capabilities
 
@@ -49,6 +63,9 @@ per-fleet or signed-PCR (PCR7) semantics.
 - `tpm-sealed-data-volume`: OS-level LUKS encryption of an EBS data volume whose key
   is sealed to NitroTPM under PCR4 + PCR12, auto-unlocked on reboot, and refused when
   the AMI's measured boot or kernel cmdline changes.
+- `attestable-ami-build`: a GitHub Actions pipeline that builds the KIWI image,
+  captures the reference PCR4 + PCR12, publishes a digest-pinned OCI artifact with a
+  SLSA attestation, and registers the attestable AMI in AWS via OIDC.
 
 ### Modified Capabilities
 <!-- None: greenfield demo project. -->
@@ -70,3 +87,8 @@ per-fleet or signed-PCR (PCR7) semantics.
   volume; the OS root is read-only (erofs) with an ephemeral overlay.
 - Per-instance scope: the sealed key is bound to that instance's NitroTPM; the volume
   is not portable to other instances.
+- CI/build infrastructure: a GitHub Actions runner (Docker for the privileged KIWI
+  builder), GHCR write access (`packages: write`), an AWS OIDC role
+  (`vars.AWS_ROLE_ARN`, `id-token: write`) with permissions to run the builder
+  instance and register images, and Terraform for the ephemeral builder instance
+  (Path A: `.raw` -> attached volume -> snapshot -> `register-image`).
