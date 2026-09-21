@@ -26,16 +26,18 @@ the cloud-init/user-data trigger entirely.
   the same way the reference uses `set-hostname-imds`).
 - Add one idempotent baked systemd unit that, on **every** boot: if the data
   volume has no LUKS header, `luksFormat`s it and enrolls a TPM2 keyslot sealed to
-  **PCR4** via `systemd-cryptenroll`, wiping the bootstrap key; then unseals from
-  NitroTPM and mounts it at `/mnt/data`. No `crypttab`/`fstab`, no self-disable —
-  the `cryptsetup isLuks` guard is the idempotency.
-- Capture the build-time reference PCR4/PCR7 (`pcr_measurements.json` from
-  `nitro-tpm-pcr-compute`) so the tamper test can predict, not just observe, the
-  PCR4 delta.
+  **PCR4 + PCR12** via `systemd-cryptenroll`, wiping the bootstrap key; then unseals
+  from NitroTPM and mounts it at `/mnt/data`. No `crypttab`/`fstab`, no self-disable —
+  the `cryptsetup isLuks` guard is the idempotency. (PCR4 alone is bypassable with
+  Secure Boot off via an injected cmdline that keeps PCR4 constant; PCR12 closes it —
+  AWS advisory GHSA-xrv8-2pf5-f3q7.)
+- Capture the build-time reference PCR4/PCR12 (`pcr_measurements.json` from
+  `nitro-tpm-pcr-compute` >= 1.1.0) so the tamper test can predict, not just observe,
+  the PCR delta.
 - Add launch + build docs and a README walkthrough: build the AMI, register it
   `--boot-mode uefi --tpm-support v2.0`, launch with a data volume, reboot ->
-  auto-unlock, then change the UKI -> PCR4 changes -> unseal fails -> volume stays
-  locked.
+  auto-unlock, then append a kernel cmdline on the same instance -> PCR12 changes ->
+  unseal fails -> volume stays locked.
 
 **Non-goals (explicit):** AWS KMS or any remote key escrow; a recovery/passphrase
 keyslot (data loss is acceptable); surviving stop/start (reboot survival only);
@@ -45,8 +47,8 @@ per-fleet or signed-PCR (PCR7) semantics.
 
 ### New Capabilities
 - `tpm-sealed-data-volume`: OS-level LUKS encryption of an EBS data volume whose key
-  is sealed to NitroTPM under PCR4, auto-unlocked on reboot, and refused when the
-  AMI's measured boot changes.
+  is sealed to NitroTPM under PCR4 + PCR12, auto-unlocked on reboot, and refused when
+  the AMI's measured boot or kernel cmdline changes.
 
 ### Modified Capabilities
 <!-- None: greenfield demo project. -->

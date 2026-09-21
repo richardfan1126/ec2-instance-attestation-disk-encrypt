@@ -3,8 +3,12 @@
 NitroTPM is a TPM 2.0 device on Nitro-based EC2 instances, exposed to the guest as
 `/dev/tpmrm0`. During UEFI measured boot, the firmware/Nitro extends Platform
 Configuration Registers (PCRs); on an AL2023 Unified Kernel Image (UKI) layout,
-**PCR4 measures the UKI** (kernel + initramfs + cmdline as one unit), so PCR4 is a
-deterministic identity for "this AMI's boot content."
+**PCR4 measures the UKI** (kernel + initramfs + the cmdline embedded at build time as
+one binary), so PCR4 is a deterministic identity for "this AMI's boot content."
+**PCR12 measures any kernel cmdline appended at boot** (systemd-boot appends what it
+is handed); on a clean boot of the unmodified AMI nothing is appended, so PCR12 is
+all-zeros. PCR4 + PCR12 is AWS's standard-boot (Secure Boot off) validation set for
+an attestable AMI.
 
 The demo runs on an **immutable attestable AL2023 AMI** built with KIWI-NG, forked
 from AWS's `attestable-image-example`: systemd-boot + UKI, dm-verity over the whole
@@ -19,7 +23,7 @@ ec2-instance-connect. Two consequences drive the design:
    emitting the reference PCR4/PCR7 as a build artifact.
 
 The only persistent writable storage on the instance is the attached EBS data
-volume. The demo binds a LUKS2 key on that volume to PCR4 using
+volume. The demo binds a LUKS2 key on that volume to PCR4 + PCR12 using
 `systemd-cryptenroll`. The sealed key lives in the LUKS2 header token on the data
 volume; unseal is per-instance by nature (bound to that instance's NitroTPM
 hierarchy), so the volume is not portable to other instances.
@@ -71,12 +75,17 @@ No cloud-init/user-data exists on this image. The enrollment unit is baked in an
 enabled with `systemctl preset` from `config.sh` — the same pattern the reference
 uses for `set-hostname-imds.service`.
 
-**Seal to PCR4 only.**
-PCR4 = the UKI hash = the AMI's boot identity, and it is emitted at build time by
-`nitro-tpm-pcr-compute`, so the tamper test can predict the expected value.
+**Seal to PCR4 + PCR12 (not PCR4 alone).**
+PCR4 = the UKI hash = the AMI's boot identity. But with Secure Boot off (our case),
+systemd-boot appends any cmdline it is handed, and an operator who can set a UEFI
+boot variable / UefiData can inject a cmdline that disables dm-verity **while leaving
+PCR4 unchanged** — the appended cmdline lands in PCR12, not PCR4. Sealing to PCR4
+alone is therefore bypassable (AWS advisory GHSA-xrv8-2pf5-f3q7; `nitro-tpm-pcr-compute`
+v1.1.0 added PCR12 for this reason). Binding **PCR4 + PCR12** is AWS's standard-boot
+validation set and closes the bypass. PCR12 is all-zeros on a clean boot of the
+unmodified AMI and is stable across reboots, so it adds no spurious-lockout risk.
 Alternatives: PCR7 (secure-boot signer) needs Secure Boot + a signing key — out of
-scope; PCR0-3 are infra/firmware and can churn on stop/start. Binding extra volatile
-PCRs only adds lockout risk for a reboot-only, per-instance demo.
+scope; PCR0-3 are infra/firmware and can churn on stop/start.
 
 **Use `systemd-cryptenroll`, not clevis or raw tpm2-tools.**
 Native to systemd (present on AL2023), one command to enroll, stores the sealed key
@@ -84,25 +93,29 @@ in the LUKS2 header token. Laziest correct option.
 
 **No recovery keyslot.**
 The user accepts data loss. Enrolling only the TPM keyslot keeps the demo honest:
-the sole way to unlock is a matching PCR4, so the tamper test proves the TPM gate
-rather than being masked by a fallback.
+the sole way to unlock is a matching PCR4 + PCR12, so the tamper test proves the TPM
+gate rather than being masked by a fallback.
 
 **Mount at `/mnt/data`.**
 The mountpoint directory is baked into the image (it cannot be created persistently
 at runtime on a read-only root).
 
-**Tamper test = change the UKI, not poke a file.**
-dm-verity means tampering the root filesystem triggers a boot-time panic (won't boot
-at all) rather than booting with a different PCR4. To prove PCR4 binding cleanly,
-the tamper test changes the UKI/kernel cmdline (rebuild or re-register with a
-different cmdline), which changes PCR4 so NitroTPM refuses to unseal on the same
-instance.
+**Tamper test = change PCR12 on the same instance, not the immutable UKI.**
+dm-verity means tampering the root filesystem panics (won't boot) rather than booting
+with a different PCR4, and the UKI/PCR4 is immutable on a running instance (changing
+it needs a new AMI/root = a different instance/TPM = a false positive from the SRK,
+not the PCR). Changing **PCR12** avoids all of that: append a kernel cmdline on the
+*same* instance (same NitroTPM, PCR4 untouched) and the sealed key is refused. Two
+drivers: (a) if the ESP is runtime-writable, drop a systemd-boot cmdline addon and
+reboot — a real boot-path tamper; (b) always available without reboot,
+`cryptsetup close` then `tpm2_pcrextend 12:...` then `cryptsetup open` fails. Both
+isolate the cmdline gate with no false-positive risk.
 
 ## Risks / Trade-offs
 
 - **KIWI-NG build complexity / scope increase** → Building the AMI is heavier than
-  reusing a stock AMI. Accepted deliberately: reproducibility and a build-time-known
-  PCR4 are worth it. Documented as a prerequisite (AL2023 builder + `kiwi-ng`).
+  reusing a stock AMI. Accepted deliberately: reproducibility and build-time-known
+  reference PCRs are worth it. Documented as a prerequisite (AL2023 builder + `kiwi-ng`).
 - **Stop/start locks the volume out** → Explicit non-goal; README warns to use
   reboot, never stop/start. Data loss is acceptable, so the failure mode is tolerable
   but must be stated.
@@ -110,7 +123,11 @@ instance.
   an existing LUKS header (`cryptsetup isLuks`) before formatting; the unit refuses
   to touch an already-provisioned volume.
 - **dm-verity changes the tamper story** → Root-fs tampering panics instead of
-  yielding a different-PCR4 boot; the honest PCR4 test is a UKI/cmdline change.
+  yielding a different-PCR boot; the honest test is a PCR12 cmdline-append change.
+- **PCR4-only seal is bypassable** → With Secure Boot off, an injected cmdline
+  disables integrity while PCR4 stays constant (AWS GHSA-xrv8-2pf5-f3q7). Mitigated by
+  binding PCR12 as well; requires `nitro-tpm-pcr-compute` >= 1.1.0 to emit the PCR12
+  reference (default all-zeros).
 - **Device naming drift** (`/dev/nvme1n1` vs `/dev/xvdb`) → Reference the data volume
   by a stable local identifier (`/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol...`),
   never a runtime AWS/IMDS lookup (that would put the network on the unlock path).
@@ -129,3 +146,10 @@ deleting the data volume, and deregistering the AMI / deleting its snapshot.
 - Which systemd target the enrollment unit should order before (e.g.
   `local-fs.target` vs a `multi-user.target` want) so the mount is ready before any
   dependent workload — pin during implementation on a real boot.
+- Verify the AL2023 `aws-nitro-tpm-tools` rpm on the builder bundles
+  `nitro-tpm-pcr-compute` >= 1.1.0 (PCR12 support landed in 1.1.0; latest is 1.1.2)
+  via `nitro-tpm-pcr-compute --version`; upgrade if it only prints PCR4/PCR7.
+  [`--tpm2-pcrs=4+12` syntax and the >=1.1.0 requirement are confirmed; only the
+  bundled rpm version is still to check on the builder.]
+- Whether the ESP is writable at runtime on this immutable image (decides if the
+  boot-path cmdline-addon tamper is possible, or only the `tpm2_pcrextend` demo).
