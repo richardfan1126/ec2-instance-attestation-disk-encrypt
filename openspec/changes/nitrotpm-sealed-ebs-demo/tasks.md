@@ -6,21 +6,22 @@
 ## 2. KIWI-NG attestable image recipe
 
 - [ ] 2.1 Fork AWS `attestable-image-example` `appliance.kiwi`: systemd-boot UKI, `verity_blocks="all"` panic-on-corruption, erofs `overlayroot` with `overlayroot_write_partition="false"`, ignore cloud-init / openssh-server / amazon-ssm-agent / ec2-instance-connect
-- [ ] 2.2 Ensure image packages include `cryptsetup`, `veritysetup`, `aws-nitro-tpm-tools`, `systemd-boot`, `dracut-kiwi-verity`, `dracut-kiwi-overlay`
+- [ ] 2.2 Ensure image packages include `cryptsetup`, `veritysetup`, `aws-nitro-tpm-tools`, `systemd-boot`, `dracut-kiwi-verity`, `dracut-kiwi-overlay` (data-volume discovery needs no extra package — no `amazon-ec2-utils` / udev rule required for the exclusion approach)
 - [ ] 2.3 Carry over `config.sh` (preset-enable our enrollment unit, cloud-init replacement pattern) and `edit_boot_install.sh` (build-time `nitro-tpm-pcr-compute` -> `pcr_measurements.json`) and `add-gpg-key.sh`
 - [ ] 2.4 Verify `nitro-tpm-pcr-compute --version` on the builder is >= 1.1.0 (PCR12 support; latest 1.1.2) so the build emits the PCR12 reference (default all-zeros), not just PCR4/PCR7
 
 ## 3. Baked enrollment unit + mountpoint
 
 - [ ] 3.1 Bake mountpoint dir `image/root/mnt/data` into the overlay
-- [ ] 3.2 Add `image/root/usr/lib/systemd/system/nitrotpm-data.service` (oneshot, `RemainAfterExit`, ordered before dependent workloads / after the block device appears)
+- [ ] 3.2 Add `image/root/usr/lib/systemd/system/nitrotpm-data.service` (oneshot, `RemainAfterExit`, `After=dev-tpmrm0.device systemd-udevd.service`, `Before=multi-user.target`; mount is imperative in-unit, so any future `/mnt/data` consumer must order `After=nitrotpm-data.service`)
 - [ ] 3.3 Enable the unit via `systemctl preset` in `config.sh`
 
 ## 4. Enrollment + unlock script
 
-- [ ] 4.1 Write the enroll/unlock script (baked into `image/root/`): resolve the data volume by a stable `/dev/disk/by-id/` identifier (no IMDS/AWS call on the unlock path)
+- [ ] 4.1 Write the enroll/unlock script (baked into `image/root/`): discover the data volume by exclusion — the single `Amazon Elastic Block Store` NVMe namespace that is **not in use by the running system** (not mounted, no holders, not in root's DM / verity / overlay chain), confirmed partition-less; no IMDS/AWS call, no baked volume id, enumeration-order-invariant
+- [ ] 4.1a Gate discovery on a **bounded, stable** candidate count (count unchanged across a short quiet window, not the first sighting); require exactly one — refuse and mount nothing on zero (no volume) or >=2 (ambiguous), biased toward waiting; write a loud structured breadcrumb to the journal on refusal (the only diagnostic surface on a zero-access image)
 - [ ] 4.2 First-boot branch (`! cryptsetup isLuks`): `luksFormat` with a random bootstrap key, enroll TPM2 keyslot sealed to PCR4 + PCR12 via `systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=4+12` (`+` is the confirmed separator), remove the bootstrap key
-- [ ] 4.3 Every-boot: `cryptsetup open` (TPM unseal), create the filesystem on first boot, mount at `/mnt/data`; exit cleanly (leave volume locked) if unseal fails
+- [ ] 4.3 Every-boot: `cryptsetup open` (TPM unseal); guard `mkfs` with a post-open `blkid` has-filesystem check (create the fs only when absent, so a provisioned volume is never re-made); mount at `/mnt/data`; exit cleanly (leave volume locked) and log a breadcrumb if unseal fails
 - [ ] 4.4 Confirm idempotency: on later boots the `isLuks` guard skips format/enroll and only opens+mounts
 
 ## 5. Build, register, launch

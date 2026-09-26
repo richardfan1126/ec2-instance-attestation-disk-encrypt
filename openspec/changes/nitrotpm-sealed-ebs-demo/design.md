@@ -102,6 +102,74 @@ a matching PCR4 + PCR12 is the sole unlock path, not masked by a fallback.
 The mountpoint directory is baked into the image (it cannot be created persistently
 at runtime on a read-only root).
 
+**Identify the data volume by exclusion, not by a baked identifier.**
+The image is immutable and has no user-data, so it cannot carry the volume-specific
+`/dev/disk/by-id/...vol...` string (the EBS volume id is per-attachment, unknown at
+build time). NVMe enumeration order is also not stable across reboots, so a fixed
+`/dev/nvme1n1` is a latent bug. The baked unit therefore discovers the data volume at
+runtime by exclusion: among NVMe namespaces, select the one whose controller model is
+`Amazon Elastic Block Store` (this excludes instance-store ephemeral disks, which are
+also whole-disk), that is **not in use by the running system** (not mounted, no
+holders, not in root's device-mapper / verity / overlay chain), and — as confirmation —
+has no partition table. This is enumeration-order-invariant and needs no extra image
+package, no udev rule, and no IMDS/AWS call on the unlock path. This suits the
+architecture where the OS/boot volume is stable and immutable while the sensitive data
+lives on a completely separate EBS volume that never participates in boot.
+
+**"Not in use" is the primary discriminator; "no partitions" only confirms.**
+"No partition table" alone is unsafe: early in boot the boot disk's partitions may not
+yet be probed, so it can transiently look whole-disk and be mis-selected — and then the
+first-boot branch would reformat the root volume. Keying on "in use by the OS" has no
+such window: by the time the unit runs (ordered after root is mounted) the boot disk is
+mounted and has holders, so it is excluded regardless of partition-probe timing. The
+partition-less check is kept as defense-in-depth. The invariant behind this is not
+luck: UEFI measured boot requires an ESP (a partition) and dm-verity requires a hash
+partition, so an attestable boot disk is necessarily GPT-partitioned — the same property
+that makes PCR4 meaningful guarantees the boot disk is partitioned. (It is coupled to
+this image's layout; revisit if the root layout ever changes.)
+
+**Require exactly one candidate; otherwise refuse and mount nothing.**
+Zero candidates (no data volume attached) and two-or-more (ambiguous) both fail the
+unit without formatting anything. This doubles as the destructive-format guard alongside
+`cryptsetup isLuks`: the unit never guesses which of several blank volumes to format.
+The three independent guards before anything is written are: exactly-one (ambiguity),
+`isLuks` (skip format/enroll), and a post-open `blkid` has-filesystem check (skip `mkfs`).
+
+**Distinguish "absent" from "not-yet-arrived" with a bounded stable-count wait, biased
+toward waiting.** There is no kernel signal for "all volumes are now present," and
+`udevadm settle` only drains queued events (it does not wait for a device that has
+emitted none). The scope decision (reboot survival, volumes attached at launch) largely
+resolves this: attach-at-launch EBS devices are enumerated before userspace, so a
+late-ordered unit sees them. The unit still gates on a **stable** candidate count (count
+unchanged across a short quiet window) rather than the first sighting, which both waits
+out the transient boot-disk topology and catches a racing second volume. Failure
+asymmetry sets the bias: a false refuse (device was slow) leaves `/mnt/data` unmounted
+and is recovered by a reboot, whereas acting on a partial view is worse (the catastrophic
+mis-format is already barred by the in-use check, leaving only a contract violation on an
+unsupported multi-volume config) — so the unit waits rather than acts when unsure. A
+0-count means user error on first boot but a detached/failing volume on reboot (data at
+stake), so reboot warrants the louder log, not a shorter wait.
+
+**On a zero-access image, a refusal is only as visible as its log.** With no SSH/SSM, a
+failed unit is not inspectable interactively; the only signals are whether `/mnt/data`
+is mounted and the journal as seen on the EC2 serial console. The unit therefore writes
+a loud, structured breadcrumb on every refuse (e.g. `REFUSED: 0 candidates after 30s`
+vs `REFUSED: 2 candidates {...}`) so the serial console alone is enough to diagnose.
+
+**Order the unit after the TPM and udev, before `multi-user.target`.**
+The unit is `After=dev-tpmrm0.device systemd-udevd.service` and
+`Before=multi-user.target`; the TPM device unit is nameable regardless of discovery, and
+running before `multi-user.target` means `/mnt/data` is mounted once the box is "ready."
+Because the mount is performed imperatively inside the oneshot (no fstab, no `.mount`
+unit — the choice that avoids the crypttab-generator fight), there is no mount unit to
+depend on: any future consumer of `/mnt/data` must order `After=nitrotpm-data.service`,
+and `RequiresMountsFor=/mnt/data` will not help unless the unit is switched to
+`systemd-mount`. For this demo, with no dependent workload, `Before=multi-user.target`
+is sufficient. If real consumers ever appear, the alternative is a udev rule that
+symlinks the discovered device to a stable name and ordering against that `.device`
+unit — cleaner ordering, but udev silently masks a symlink collision, which would weaken
+the two-volume refusal, so it is deferred.
+
 **No live wrong-PCR demo; PCR12 stays in the seal policy regardless.**
 We do not ship a test that makes an already-sealed instance boot with a changed PCR
 and observes the lock. It is not cleanly demonstrable on this image: reaching an
@@ -220,11 +288,12 @@ deleting the data volume, and deregistering the AMI / deleting its snapshot.
 
 ## Open Questions
 
-- Exact `/dev/disk/by-id/` string for the data volume on the chosen instance type
-  (confirm against a real launch; the EBS volume id appears in the NVMe serial).
-- Which systemd target the enrollment unit should order before (e.g.
-  `local-fs.target` vs a `multi-user.target` want) so the mount is ready before any
-  dependent workload — pin during implementation on a real boot.
+- Confirm on a real instance the exact NVMe controller model string
+  (`/sys/block/nvme*n1/device/model` — casing / trailing whitespace) that the exclusion
+  filter matches on, and that the KIWI boot disk is GPT-partitioned as expected.
+  (Device discovery and unit ordering are otherwise decided above — discover the data
+  volume by exclusion keyed on "not in use," order `After=dev-tpmrm0.device` /
+  `Before=multi-user.target`.)
 - Verify the AL2023 `aws-nitro-tpm-tools` rpm on the builder bundles
   `nitro-tpm-pcr-compute` >= 1.1.0 (PCR12 support landed in 1.1.0; latest is 1.1.2)
   via `nitro-tpm-pcr-compute --version`; upgrade if it only prints PCR4/PCR7.
