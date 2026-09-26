@@ -52,10 +52,10 @@
 
 ## 9. CI: AMI build job (Path A)
 
-- [ ] 9.1 Add `terraform/build-ami/` for an ephemeral builder instance (right-sized) + its IAM
-- [ ] 9.2 Add `scripts/build-ami.py`: pull the OCI artifact by digest, verify the expected workflow, `dd` raw -> attached volume -> `create-snapshot` -> `register-image --boot-mode uefi --tpm-support v2.0`, emit `ami_build_result.json`
-- [ ] 9.3 Add job `build-ami` (`needs: build-and-publish`, `main`/dispatch only): OIDC `configure-aws-credentials` with `vars.AWS_ROLE_ARN`, setup Terraform + uv, run `build-ami.py`
-- [ ] 9.4 `if: always()` cleanup: `terraform destroy`, warn on failure for manual cleanup; upload `ami_build_result.json`
+- [ ] 9.1 Add `terraform/build-ami/` for an ephemeral **stock AL2023** builder instance (right-sized) + its instance profile (EBS/snapshot/register + `ssm:PutParameter` + GHCR read); this instance is NOT our attestable AMI, so no zero-access rule applies to it
+- [ ] 9.2 Add `scripts/build-ami.py` (runs ON the builder via `user-data`, not on the runner — the volume can only attach to the instance): pull the OCI artifact by digest, verify the expected workflow, `dd` raw -> attached volume -> `create-snapshot` -> `register-image --boot-mode uefi --tpm-support v2.0`, write the AMI id to an SSM parameter (and `ami_build_result.json`)
+- [ ] 9.3 Add job `build-ami` (`needs: build-and-publish`, `main`/dispatch only): OIDC `configure-aws-credentials` with `vars.AWS_ROLE_ARN`, setup Terraform, `terraform apply` (launch builder with `build-ami.py` as `user-data`), poll the SSM parameter for the AMI id — no inbound SSH, no keypair
+- [ ] 9.4 `if: always()` cleanup: `terraform destroy`, warn on failure for manual cleanup; record the AMI id / `ami_build_result.json` in the job summary
 
 ## 10. CI: hardening + docs
 

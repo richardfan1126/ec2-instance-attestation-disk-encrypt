@@ -135,6 +135,20 @@ instance, `dd`s the `.raw` onto an attached volume, snapshots it, and calls
 Chosen over `import-snapshot` (Path B) because it is proven for NitroTPM/UEFI and
 fully controllable; Path B's raw+UEFI+`tpm-support` import path is unverified.
 
+**The builder instance is stock plumbing, not the product; drive it via `user-data`.**
+The Path A builder is a throwaway **stock AL2023** instance whose only job is to host
+a block device: pull the raw, `dd` it onto an attached volume, snapshot, and
+`register-image`. It is **not** launched from our attestable AMI, so the
+zero-operator-access rule does not apply to it — it never appears in the shipped
+artifact or its PCRs. The transport that keeps the runner->instance boundary cleanest
+is `user-data`: the launch bakes in "ORAS pull the digest-pinned artifact -> dd ->
+create-snapshot -> register-image -> write the AMI id to an SSM parameter," and the
+runner just polls that parameter, then `terraform destroy`s. No inbound SSH port, no
+ephemeral keypair, no interactive session — the instance does its one job and dies.
+It needs an instance profile with EBS/snapshot/register + `ssm:PutParameter` and GHCR
+read for the ORAS pull. (SSH or `ssm send-command` are fallbacks if `user-data` proves
+awkward to signal from; `user-data` is the laziest fire-and-forget path.)
+
 **Reference PCRs are a verification anchor, not a seal input.**
 `pcr_measurements.json` (build-time PCR4 + PCR12) is used by a human to confirm a
 running instance measured to the AMI that was built. It is deliberately **not** fed
