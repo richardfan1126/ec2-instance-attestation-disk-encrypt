@@ -19,7 +19,7 @@
 ## 4. Enrollment + unlock script
 
 - [ ] 4.1 Write the enroll/unlock script (baked into `image/root/`): resolve the data volume by a stable `/dev/disk/by-id/` identifier (no IMDS/AWS call on the unlock path)
-- [ ] 4.2 First-boot branch (`! cryptsetup isLuks`): assert live PCR12 is all-zeros (refuse to enroll otherwise, guarding against a first boot with an injected cmdline), `luksFormat` with a random bootstrap key, enroll TPM2 keyslot sealed to PCR4 + PCR12 via `systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=4+12` (`+` is the confirmed separator), remove the bootstrap key
+- [ ] 4.2 First-boot branch (`! cryptsetup isLuks`): `luksFormat` with a random bootstrap key, enroll TPM2 keyslot sealed to PCR4 + PCR12 via `systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=4+12` (`+` is the confirmed separator), remove the bootstrap key
 - [ ] 4.3 Every-boot: `cryptsetup open` (TPM unseal), create the filesystem on first boot, mount at `/mnt/data`; exit cleanly (leave volume locked) if unseal fails
 - [ ] 4.4 Confirm idempotency: on later boots the `isLuks` guard skips format/enroll and only opens+mounts
 
@@ -33,15 +33,13 @@
 
 - [ ] 6.1 Document step: launch -> first boot enrolls -> reboot -> volume auto-unlocks and mounts at `/mnt/data` (with verification commands)
 - [ ] 6.1a Document that the reference `pcr_measurements.json` is a verification anchor (confirm the running instance's live PCR4 matches the built AMI), not an input to the seal; first-boot PCR4 trust rests on immutability + dm-verity
-- [ ] 6.2 Document the tamper step: append a kernel cmdline on the same instance (UEFI boot variable or systemd-boot addon) and reboot, or `tpm2_pcrextend 12:...` without reboot; show PCR12 changed vs `pcr_measurements.json` (PCR4 unchanged) and the volume stays locked
-- [ ] 6.3 Note the PCR4-only bypass this defends against (AWS GHSA-xrv8-2pf5-f3q7): an injected cmdline that disables integrity while keeping PCR4 constant
-- [ ] 6.4 Document the reboot-only boundary and the explicit warning: do NOT stop/start (measurements change; data becomes unrecoverable by design)
+- [ ] 6.2 Note the PCR4-only bypass PCR12 defends against (AWS GHSA-xrv8-2pf5-f3q7): an injected cmdline that disables integrity while keeping PCR4 constant — explaining why the seal binds PCR4 + PCR12 (no live tamper demo is shipped)
+- [ ] 6.3 Document the reboot-only boundary and the explicit warning: do NOT stop/start (measurements change; data becomes unrecoverable by design)
 
 ## 7. Verification
 
 - [ ] 7.1 Manual test on a real instance: reboot survives unlock (happy path), `/mnt/data` mounted
-- [ ] 7.2 Manual test: append a cmdline (or `tpm2_pcrextend 12`) -> locked (negative path), confirm PCR12 delta via `tpm2_pcrread sha256:12` against the build reference while PCR4 is unchanged
-- [ ] 7.3 Manual test: unlock works with the network detached / no AWS credentials (proves no KMS/IAM dependency)
+- [ ] 7.2 Manual test: unlock works with the network detached / no AWS credentials (proves no KMS/IAM dependency)
 
 ## 8. CI: image build + publish job
 

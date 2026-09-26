@@ -33,7 +33,7 @@ hierarchy), so the volume is not portable to other instances.
 **Goals:**
 - Prove OS-level encryption of an EBS data volume with the key sealed to NitroTPM.
 - Auto-unlock across **reboot** with zero operator interaction.
-- Demonstrate that changing the measured boot (PCR4) leaves the volume locked.
+- Bind the key so that a changed measured boot (PCR4 or PCR12) leaves the volume locked.
 - Zero external dependencies at unlock time (no KMS, IAM, or network).
 - Ship the full build recipe so the AMI is reproducible.
 
@@ -44,6 +44,9 @@ hierarchy), so the volume is not portable to other instances.
 - Surviving **stop/start** (AWS documents that this changes measurements; only
   reboot survival is in scope).
 - Per-fleet or signed-PCR (PCR7 + signing key) semantics.
+- A live wrong-PCR tamper demonstration — the lock is a property of the seal policy,
+  not something the demo actively triggers. It is not cleanly reachable on a
+  zero-access instance (see the tamper-demo decision below).
 
 ## Decisions
 
@@ -93,23 +96,22 @@ in the LUKS2 header token. Laziest correct option.
 
 **No recovery keyslot.**
 The user accepts data loss. Enrolling only the TPM keyslot keeps the demo honest:
-the sole way to unlock is a matching PCR4 + PCR12, so the tamper test proves the TPM
-gate rather than being masked by a fallback.
+a matching PCR4 + PCR12 is the sole unlock path, not masked by a fallback.
 
 **Mount at `/mnt/data`.**
 The mountpoint directory is baked into the image (it cannot be created persistently
 at runtime on a read-only root).
 
-**Tamper test = change PCR12 on the same instance, not the immutable UKI.**
-dm-verity means tampering the root filesystem panics (won't boot) rather than booting
-with a different PCR4, and the UKI/PCR4 is immutable on a running instance (changing
-it needs a new AMI/root = a different instance/TPM = a false positive from the SRK,
-not the PCR). Changing **PCR12** avoids all of that: append a kernel cmdline on the
-*same* instance (same NitroTPM, PCR4 untouched) and the sealed key is refused. Two
-drivers: (a) if the ESP is runtime-writable, drop a systemd-boot cmdline addon and
-reboot — a real boot-path tamper; (b) always available without reboot,
-`cryptsetup close` then `tpm2_pcrextend 12:...` then `cryptsetup open` fails. Both
-isolate the cmdline gate with no false-positive risk.
+**No live wrong-PCR demo; PCR12 stays in the seal policy regardless.**
+We do not ship a test that makes an already-sealed instance boot with a changed PCR
+and observes the lock. It is not cleanly demonstrable on this image: reaching an
+already-sealed instance's boot inputs needs either an in-guest shell (which the
+zero-access image deliberately lacks) or a stop/start / offline volume edit (which
+rotates NitroTPM state and confounds the result — you cannot attribute the lock to
+the PCR change vs. the state change). PCR4 in particular can never be isolated on a
+single instance: changing it means a different AMI, hence a different instance/TPM.
+The security property (a non-matching PCR4 or PCR12 leaves the volume locked) is
+enforced by the TPM seal policy itself and holds without a live negative demo.
 
 **Automate the build with a two-job GitHub Actions pipeline (mirror the reference).**
 KIWI needs privilege, and `.raw` -> AMI needs AWS — two different environments, so
@@ -135,8 +137,8 @@ fully controllable; Path B's raw+UEFI+`tpm-support` import path is unverified.
 
 **Reference PCRs are a verification anchor, not a seal input.**
 `pcr_measurements.json` (build-time PCR4 + PCR12) is used by a human to confirm a
-running instance measured to the AMI that was built, and to predict the tamper delta.
-It is deliberately **not** fed into the seal: `systemd-cryptenroll` binds to the PCRs
+running instance measured to the AMI that was built. It is deliberately **not** fed
+into the seal: `systemd-cryptenroll` binds to the PCRs
 that are live at first-boot enroll time. Enforcing the reference PCR4 locally is
 impossible without circularity — PCR4 = hash(UKI), the UKI cmdline embeds the
 dm-verity roothash, and the roothash covers every block of the erofs root, so any file
@@ -147,13 +149,14 @@ dm-verity + launching a chosen attestable AMI id, which is acceptable for this d
 This differs from the KMS reference, where the reference PCR is load-bearing (baked
 into the KMS key policy so KMS enforces it).
 
-**Guard first-boot enrollment with a live PCR12 == all-zeros check.**
-Unlike PCR4, PCR12's good value is a known constant (all-zeros) independent of the
-build, so it is enforceable at enroll time with no baked file, no network, and no
-circularity. The enroll script reads live PCR12 and refuses to seal if it is non-zero,
-closing the first-boot TOFU gap where the very first boot already carries an injected
-cmdline. The cmdline vector we added PCR12 for is thus guarded at enroll time as well
-as at unlock time.
+**No enrollment-time PCR guard; seal to live PCRs at first boot (TOFU).**
+The enroll step binds to whatever PCRs are live at first boot without pre-checking
+them. A tampered first boot (PCR12 != 0) self-defeats: the key seals to that value
+and then fails to unlock on the next clean boot, so the volume never becomes usable
+under the tampered measurement. A dedicated `live PCR12 == 0` pre-check would only
+move that failure from the next reboot to enroll time; it is dropped as unnecessary.
+Add it back if first-boot integrity ever needs to fail fast instead of on the next
+reboot.
 
 **Supply-chain hardening kept from the reference.**
 OIDC role-to-assume (no static AWS keys), every action pinned by commit SHA,
@@ -176,8 +179,10 @@ so it is omitted rather than carried as a disabled escape hatch.
 - **First-boot script reformats a volume with data** → Idempotency guard checks for
   an existing LUKS header (`cryptsetup isLuks`) before formatting; the unit refuses
   to touch an already-provisioned volume.
-- **dm-verity changes the tamper story** → Root-fs tampering panics instead of
-  yielding a different-PCR boot; the honest test is a PCR12 cmdline-append change.
+- **dm-verity makes PCR4 effectively immutable on a running instance** → Root-fs
+  tampering panics instead of yielding a different-PCR4 boot, which is why PCR4 cannot
+  be exercised on a single instance and PCR12 is the meaningful runtime gate the seal
+  policy adds on top.
 - **PCR4-only seal is bypassable** → With Secure Boot off, an injected cmdline
   disables integrity while PCR4 stays constant (AWS GHSA-xrv8-2pf5-f3q7). Mitigated by
   binding PCR12 as well; requires `nitro-tpm-pcr-compute` >= 1.1.0 to emit the PCR12
@@ -211,8 +216,6 @@ deleting the data volume, and deregistering the AMI / deleting its snapshot.
   via `nitro-tpm-pcr-compute --version`; upgrade if it only prints PCR4/PCR7.
   [`--tpm2-pcrs=4+12` syntax and the >=1.1.0 requirement are confirmed; only the
   bundled rpm version is still to check on the builder.]
-- Whether the ESP is writable at runtime on this immutable image (decides if the
-  boot-path cmdline-addon tamper is possible, or only the `tpm2_pcrextend` demo).
 - Builder instance type/size for Path A (the reference uses `c5.9xlarge` for a larger
   image; ours is smaller — right-size during implementation).
 - If Path A ever proves too heavy, confirm whether `import-snapshot` + our own

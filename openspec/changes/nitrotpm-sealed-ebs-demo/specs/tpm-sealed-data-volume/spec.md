@@ -8,24 +8,16 @@ the bootstrap key so that only the TPM-sealed keyslot remains. Enrollment SHALL 
 performed by a systemd unit baked into the immutable image (there is no cloud-init
 or user-data). The unit SHALL be idempotent: it runs on every boot but reformats
 only a volume that has no LUKS header, so an already-provisioned volume is never
-destroyed. Before sealing on a fresh volume, the unit SHALL verify that the live PCR12
-is all-zeros and SHALL refuse to enroll otherwise, so it never seals to a first boot
-that already carries an injected kernel cmdline.
+destroyed. Enrollment binds to whatever PCRs are live at first boot; it does not
+pre-check them.
 
 #### Scenario: Fresh data volume is provisioned
 
 - **WHEN** the enrollment unit runs and the target data volume has no LUKS header
-- **AND** the live PCR12 is all-zeros
 - **THEN** the volume is formatted as LUKS2 with a random bootstrap key
 - **AND** a TPM2 keyslot sealed to PCR4 + PCR12 is enrolled via `systemd-cryptenroll`
 - **AND** the bootstrap key is removed, leaving only the TPM-sealed keyslot
 - **AND** the volume is unlocked and mounted at `/mnt/data`
-
-#### Scenario: Enrollment refused when first boot carries an injected cmdline
-
-- **WHEN** the enrollment unit runs on a fresh volume and the live PCR12 is not all-zeros
-- **THEN** no LUKS format or TPM enrollment is performed
-- **AND** the volume is left unprovisioned so a tampered first boot is never sealed
 
 #### Scenario: Already-provisioned volume is left untouched
 
@@ -54,11 +46,10 @@ remain locked and unmounted. No fallback key is provided, so the data is
 inaccessible. This SHALL include the case where the UKI is unchanged (PCR4 constant)
 but a kernel cmdline is appended at boot (PCR12 changes).
 
-#### Scenario: Appended kernel cmdline on the same instance is denied
+#### Scenario: Boot with a non-matching PCR leaves the volume locked
 
-- **WHEN** a kernel cmdline is appended on the same instance (via UEFI boot variable or a systemd-boot addon) and it reboots
-- **THEN** PCR4 is unchanged but PCR12 differs from the value the key was sealed to
-- **AND** NitroTPM refuses to unseal the key
+- **WHEN** the instance boots with a PCR4 or PCR12 that differs from the sealing policy (for example an appended kernel cmdline changes PCR12 while PCR4 is unchanged)
+- **THEN** NitroTPM refuses to release the sealed key
 - **AND** the data volume stays locked and is not mounted
 
 ### Requirement: No key material leaves the instance

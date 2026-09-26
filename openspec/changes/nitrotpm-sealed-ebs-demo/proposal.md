@@ -32,12 +32,11 @@ the cloud-init/user-data trigger entirely.
   Secure Boot off via an injected cmdline that keeps PCR4 constant; PCR12 closes it —
   AWS advisory GHSA-xrv8-2pf5-f3q7.)
 - Capture the build-time reference PCR4/PCR12 (`pcr_measurements.json` from
-  `nitro-tpm-pcr-compute` >= 1.1.0) so the tamper test can predict, not just observe,
-  the PCR delta.
+  `nitro-tpm-pcr-compute` >= 1.1.0) as a verification anchor to confirm a running
+  instance measured to the AMI that was built (not an input to the seal).
 - Add launch + build docs and a README walkthrough: build the AMI, register it
   `--boot-mode uefi --tpm-support v2.0`, launch with a data volume, reboot ->
-  auto-unlock, then append a kernel cmdline on the same instance -> PCR12 changes ->
-  unseal fails -> volume stays locked.
+  auto-unlock and mount at `/mnt/data`.
 - Add a GitHub Actions pipeline that builds the AMI automatically (two jobs):
   - **Build + publish:** build the KIWI `.raw` inside a privileged Docker
     `kiwi-builder` on the runner, extract the reference **PCR4 + PCR12** from
@@ -55,7 +54,8 @@ the cloud-init/user-data trigger entirely.
 **Non-goals (explicit):** AWS KMS or any remote key escrow; a recovery/passphrase
 keyslot (data loss is acceptable); surviving stop/start (reboot survival only);
 per-fleet or signed-PCR (PCR7) semantics; an SSH / debug build path (the image is
-zero-operator-access by design).
+zero-operator-access by design); a live wrong-PCR tamper demonstration (the lock is a
+seal-policy property, not cleanly demonstrable on a zero-access instance).
 
 ## Capabilities
 
