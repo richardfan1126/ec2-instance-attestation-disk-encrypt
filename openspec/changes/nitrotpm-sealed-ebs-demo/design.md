@@ -41,8 +41,14 @@ hierarchy), so the volume is not portable to other instances.
 - AWS KMS or any remote key escrow (including the reference's `nitro-tpm-attest` +
   `kms --recipient` path).
 - A recovery/passphrase keyslot — data loss on PCR change is acceptable.
-- Surviving **stop/start** (AWS documents that this changes measurements; only
-  reboot survival is in scope).
+- Surviving **stop/start**. A stopped/started instance gets fresh NitroTPM state:
+  the storage hierarchy the sealed keyslot lives under does not persist across
+  stop/start, so the TPM can no longer unseal the key. Note this is *not* because
+  the measurements change — PCR4/PCR12 recompute to the same values for the same
+  AMI (AWS: "PCRs are recalculated after each reboot"); the lockout is TPM-state
+  loss, not a PCR mismatch. (AWS's public docs do not spell out the stop/start TPM
+  persistence boundary; this is observed TPM behavior.) Reboot keeps the same TPM
+  state and the same PCRs, so only reboot survival is in scope.
 - Per-fleet or signed-PCR (PCR7 + signing key) semantics.
 - A live wrong-PCR tamper demonstration — the lock is a property of the seal policy,
   not something the demo actively triggers. It is not cleanly reachable on a
@@ -279,8 +285,10 @@ so it is omitted rather than carried as a disabled escape hatch.
   reusing a stock AMI. Accepted deliberately: reproducibility and build-time-known
   reference PCRs are worth it. Documented as a prerequisite (AL2023 builder + `kiwi-ng`).
 - **Stop/start locks the volume out** → Explicit non-goal; README warns to use
-  reboot, never stop/start. Data loss is acceptable, so the failure mode is tolerable
-  but must be stated.
+  reboot, never stop/start. The cause is fresh NitroTPM state on stop/start (the
+  sealed keyslot's storage hierarchy does not persist), not a PCR change — PCR4/PCR12
+  recompute identically for the same AMI. Data loss is acceptable, so the failure mode
+  is tolerable but must be stated with the correct mechanism.
 - **First-boot script reformats a volume with data** → Idempotency guard checks for
   an existing LUKS header (`cryptsetup isLuks`) before formatting; the unit refuses
   to touch an already-provisioned volume.

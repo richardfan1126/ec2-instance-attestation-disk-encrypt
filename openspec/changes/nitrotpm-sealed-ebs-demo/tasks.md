@@ -35,7 +35,7 @@
 - [ ] 6.1 Document step: launch -> first boot enrolls -> reboot -> volume auto-unlocks and mounts at `/mnt/data` (with verification commands)
 - [ ] 6.1a Document that the reference `pcr_measurements.json` is a verification anchor (confirm the running instance's live PCR4 matches the built AMI), not an input to the seal; first-boot PCR4 trust rests on immutability + dm-verity
 - [ ] 6.2 Note the PCR4-only bypass PCR12 defends against (AWS GHSA-xrv8-2pf5-f3q7): an injected cmdline that disables integrity while keeping PCR4 constant — explaining why the seal binds PCR4 + PCR12 (no live tamper demo is shipped)
-- [ ] 6.3 Document the reboot-only boundary and the explicit warning: do NOT stop/start (measurements change; data becomes unrecoverable by design)
+- [ ] 6.3 Document the reboot-only boundary and the explicit warning: do NOT stop/start (fresh NitroTPM state on stop/start leaves the sealed key unrecoverable — not a PCR change; PCR4/PCR12 recompute identically. Reboot keeps TPM state and PCRs)
 
 ## 7. Verification
 
