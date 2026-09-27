@@ -44,7 +44,12 @@ jobs:
 
       - name: Build the attestable .raw image
         run: |
+          # -v /dev:/dev shares the host devtmpfs so the kernel-created
+          # /dev/loop0pN partition nodes (from `partx --add`) are visible in
+          # the container; Docker's default tmpfs /dev hides them and KIWI
+          # fails with "Device /dev/loop0p1 does not exist".
           docker run --rm --privileged \
+            -v /dev:/dev \
             -v "$PWD:/work" -w /work \
             kiwi-builder:local \
             .github/scripts/build-kiwi-image.sh image build-output
