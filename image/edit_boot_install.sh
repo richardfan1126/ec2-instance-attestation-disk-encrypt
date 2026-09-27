@@ -77,7 +77,7 @@ if [ -f "$efi_mount/EFI/Linux/kiwi.efi" ]; then
         rm -rf "$efi_mount/EFI/systemd"
     fi
 
-    if sudo "$root_mount/usr/bin/nitro-tpm-pcr-compute" \
+    if "$root_mount/usr/bin/nitro-tpm-pcr-compute" \
         --image "$efi_mount/EFI/BOOT/$EFI_BINARY" | tee "$pcr_values_file"; then
         echo "SUCCESS: PCR measurements computed and saved to: $pcr_values_file"
     else
