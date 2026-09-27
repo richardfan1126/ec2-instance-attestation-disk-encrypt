@@ -3,6 +3,13 @@ name: build-attestable-image
 on:
   push:
     branches: [main]
+    # Docs/spec-only commits don't change the image; skip the build + AMI
+    # register. Use workflow_dispatch to rebuild on demand.
+    paths-ignore:
+      - 'README.md'
+      - 'LICENSE'
+      - 'openspec/**'
+      - '.gitignore'
   workflow_dispatch:
 
 env:
