@@ -45,10 +45,10 @@ the cloud-init/user-data trigger entirely.
     checksum-verified) and generate a SLSA build-provenance attestation
     (`actions/attest`, pushed to the registry).
   - **Build AMI:** authenticate to AWS via OIDC (`role-to-assume`, no static keys),
-    provision an ephemeral Terraform-managed builder instance, pull the OCI artifact
-    (verifying the expected workflow), convert `.raw` -> EBS snapshot ->
-    `register-image --boot-mode uefi --tpm-support v2.0`, emit the AMI id, and always
-    tear the builder down.
+    pull the OCI artifact by digest (verifying the expected workflow), then, **on the
+    runner itself**, `coldsnap upload` the `.raw` straight to an EBS snapshot (EBS direct
+    APIs, no builder instance) and `register-image --boot-mode uefi --tpm-support v2.0`,
+    emitting the AMI id. `coldsnap` is installed from a version-pinned cached binary.
   - Pin every action by commit SHA; scope `permissions` per job.
 
 **Non-goals (explicit):** AWS KMS or any remote key escrow; a recovery/passphrase
@@ -88,7 +88,8 @@ seal-policy property, not cleanly demonstrable on a zero-access instance).
 - Per-instance scope: the sealed key is bound to that instance's NitroTPM; the volume
   is not portable to other instances.
 - CI/build infrastructure: a GitHub Actions runner (Docker for the privileged KIWI
-  builder), GHCR write access (`packages: write`), an AWS OIDC role
-  (`vars.AWS_ROLE_ARN`, `id-token: write`) with permissions to run the builder
-  instance and register images, and Terraform for the ephemeral builder instance
-  (Path A: `.raw` -> attached volume -> snapshot -> `register-image`).
+  builder), GHCR write access (`packages: write`), and an AWS OIDC role
+  (`vars.AWS_ROLE_ARN`, `id-token: write`) scoped to the EBS direct APIs
+  (`ebs:StartSnapshot`/`PutSnapshotBlock`/`CompleteSnapshot`, `ec2:RegisterImage`,
+  `ec2:DescribeSnapshots`). The `.raw` -> snapshot -> AMI step runs on the runner via
+  `coldsnap`; no builder instance, no Terraform.

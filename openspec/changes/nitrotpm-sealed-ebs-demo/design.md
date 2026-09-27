@@ -196,26 +196,49 @@ so the extraction step reads those from `pcr_measurements.json` and **fails the 
 if PCR12 is missing** — which doubles as the guard that the bundled
 `nitro-tpm-pcr-compute` is >= 1.1.0.
 
-**Raw -> AMI via an ephemeral Terraform builder instance (Path A).**
-`register-image` needs the bits as an EBS snapshot. Path A provisions a throwaway
-instance, `dd`s the `.raw` onto an attached volume, snapshots it, and calls
-`register-image --boot-mode uefi --tpm-support v2.0`, then always `terraform destroy`s.
-Chosen over `import-snapshot` (Path B) because it is proven for NitroTPM/UEFI and
-fully controllable; Path B's raw+UEFI+`tpm-support` import path is unverified.
+**Raw -> AMI via `coldsnap` on the runner, no builder instance.**
+`register-image` needs the bits as an EBS snapshot. `coldsnap` (awslabs) uploads a
+local raw disk straight to an EBS snapshot through the EBS direct APIs
+(`StartSnapshot` / `PutSnapshotBlock` / `CompleteSnapshot`) block-for-block; it never
+interprets the filesystem, so the erofs/dm-verity bytes and therefore PCR4 are
+preserved. Because it talks to the API over HTTPS with ambient credentials, it does
+**not** need the snapshot volume attached to an instance, so it runs directly on the
+GitHub runner under the job's OIDC role. The reference repo
+(`ec2-instance-attestation-demo`) proves the end-to-end result: `coldsnap upload` ->
+snapshot -> `register-image --boot-mode uefi --tpm-support v2.0` produced a working
+attestable AMI (`RootDeviceName=/dev/xvda`, `Architecture=x86_64`, `EnaSupport`,
+`VirtualizationType=hvm`). This drops the entire builder-instance apparatus the earlier
+plan carried (VPC/subnet/SG, EC2 instance + instance profile, SSH, Terraform,
+`terraform destroy`), and with it the builder-leak risk. It also beats the two
+alternatives considered: `dd` onto an attached volume needs an instance, and
+`import-snapshot` needs an S3 upload plus a `vmimport` service role and is async.
+(`import-image` is disqualified outright: it modifies the guest — driver/agent
+injection — which would change the root filesystem, the dm-verity roothash, and PCR4.
+`import-snapshot` and `coldsnap` are pure block copies and do not.)
 
-**The builder instance is stock plumbing, not the product; drive it via `user-data`.**
-The Path A builder is a throwaway **stock AL2023** instance whose only job is to host
-a block device: pull the raw, `dd` it onto an attached volume, snapshot, and
-`register-image`. It is **not** launched from our attestable AMI, so the
-zero-operator-access rule does not apply to it — it never appears in the shipped
-artifact or its PCRs. The transport that keeps the runner->instance boundary cleanest
-is `user-data`: the launch bakes in "ORAS pull the digest-pinned artifact -> dd ->
-create-snapshot -> register-image -> write the AMI id to an SSM parameter," and the
-runner just polls that parameter, then `terraform destroy`s. No inbound SSH port, no
-ephemeral keypair, no interactive session — the instance does its one job and dies.
-It needs an instance profile with EBS/snapshot/register + `ssm:PutParameter` and GHCR
-read for the ORAS pull. (SSH or `ssm send-command` are fallbacks if `user-data` proves
-awkward to signal from; `user-data` is the laziest fire-and-forget path.)
+**Install `coldsnap` by caching the compiled binary; the compile does not justify an
+instance.** `coldsnap` ships no prebuilt binaries (all GitHub releases have empty
+assets; crates.io is source-only, latest 0.12.0), and `cargo install` is slow because
+it builds the whole AWS Rust SDK (~5-15 min on a 2-core runner). The reference sidesteps
+this only by compiling on a `c5.9xlarge` (36 vCPUs) — i.e. it pays for a large instance
+to make a one-time-per-version compile fast. On the runner the cheaper fix is to cache
+the built binary keyed on the pinned `coldsnap` version (`~/.cargo/bin/coldsnap`,
+key `coldsnap-<os>-<version>`): compile once, restore instantly thereafter, near-100%
+hit rate until the version is bumped. GitHub cache evicts entries unused for 7 days, so
+a build gap means one slow run; acceptable for a demo. If guaranteed-fast-every-run is
+ever needed, prebuild the binary once and store it as our own digest-pinned artifact
+(GHCR/release asset, checksum-verified on download), fitting the existing OCI
+supply-chain pattern — still no instance.
+
+**Keep an instance only if upload throughput, not compilation, becomes the bottleneck.**
+`coldsnap upload` from a GitHub-hosted runner crosses the internet into the region and
+pushes 512 KiB blocks against the rate-limited EBS direct API. For a demo-sized image
+(a few GB) this is minutes and fine. Only if the image grew large or builds got frequent
+would an in-region instance's faster upload justify itself — and even then, not with the
+reference's transport (inbound SSH :22 from `get_user_public_ip()`, an ephemeral
+keypair). That model is a security smell and CI-fragile (in CI the "user IP" is the
+runner's egress IP); a fallback instance would use an instance profile + `user-data` /
+SSM, no inbound SSH.
 
 **Reference PCRs are a verification anchor, not a seal input.**
 `pcr_measurements.json` (build-time PCR4 + PCR12) is used by a human to confirm a
@@ -269,15 +292,22 @@ so it is omitted rather than carried as a disabled escape hatch.
   disables integrity while PCR4 stays constant (AWS GHSA-xrv8-2pf5-f3q7). Mitigated by
   binding PCR12 as well; requires `nitro-tpm-pcr-compute` >= 1.1.0 to emit the PCR12
   reference (default all-zeros).
-- **CI builder-instance leak** → Job 2 provisions a real EC2 instance; a failed
-  `terraform destroy` leaves it (and its cost) running. Mitigated by `if: always()`
-  cleanup and least-privilege; the README notes manual-cleanup as the fallback.
-- **CI scope/cost** → A privileged Docker build plus an EC2 builder instance per run
-  is heavier than the rest of the demo. Accepted because the user chose the full
-  pipeline; documented as a prerequisite (GHCR, OIDC role, Terraform).
-- **Device naming drift** (`/dev/nvme1n1` vs `/dev/xvdb`) → Reference the data volume
-  by a stable local identifier (`/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol...`),
-  never a runtime AWS/IMDS lookup (that would put the network on the unlock path).
+- **`coldsnap` compile time on the runner** → No prebuilt binary exists, so a cold
+  `cargo install` builds the whole AWS Rust SDK (~5-15 min on a 2-core runner).
+  Mitigated by caching the built binary keyed on the pinned version (compile once);
+  a >7-day build gap evicts the cache and costs one slow run. Optional escalation: a
+  self-published digest-pinned binary artifact.
+- **`coldsnap` upload throughput from the runner** → EBS direct API pushes are 512 KiB
+  blocks over the internet into the region and are rate-limited. Fine for a demo-sized
+  image (minutes); only a large or frequently-built image would warrant moving the
+  upload onto an in-region instance (instance profile + `user-data`, never inbound SSH).
+- **CI scope/cost** → A privileged Docker build (KIWI needs loop devices) is the
+  heaviest CI piece; the AMI job is now just runner-side `coldsnap` + `register-image`,
+  no EC2 builder instance. Documented as a prerequisite (GHCR, OIDC role).
+- **Device naming drift** (`/dev/nvme1n1` order not stable across reboots) → The baked
+  unit discovers the data volume by exclusion (the single EBS-model NVMe namespace not
+  in use by the running system), never by a fixed name or an AWS/IMDS lookup, so it is
+  enumeration-order-invariant with no network on the unlock path.
 - **PCR4 semantics depend on the UKI layout** → Guaranteed here because the KIWI
   recipe produces a UKI via systemd-boot + `dracut uefi="true"`.
 
@@ -299,8 +329,10 @@ deleting the data volume, and deregistering the AMI / deleting its snapshot.
   via `nitro-tpm-pcr-compute --version`; upgrade if it only prints PCR4/PCR7.
   [`--tpm2-pcrs=4+12` syntax and the >=1.1.0 requirement are confirmed; only the
   bundled rpm version is still to check on the builder.]
-- Builder instance type/size for Path A (the reference uses `c5.9xlarge` for a larger
-  image; ours is smaller — right-size during implementation).
-- If Path A ever proves too heavy, confirm whether `import-snapshot` + our own
-  `register-image --tpm-support v2.0` (Path B) supports the raw+UEFI path before
-  switching.
+- Confirm runner-side `coldsnap upload` throughput is acceptable for this image's size
+  (the one open variable in the no-instance AMI job); if not, fall back to an in-region
+  upload instance (instance profile + `user-data`, no inbound SSH). The `coldsnap` ->
+  `register-image --boot-mode uefi --tpm-support v2.0` path itself is confirmed by the
+  reference repo, so this is a performance check, not a feasibility one.
+- Pin the `coldsnap` version and the cache strategy (cache `~/.cargo/bin/coldsnap` keyed
+  on version vs. self-publishing a digest-pinned prebuilt binary) during implementation.

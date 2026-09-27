@@ -33,23 +33,25 @@ Downstream consumers SHALL be given a digest-pinned reference, not a mutable tag
 
 A second GitHub Actions job SHALL authenticate to AWS using an OIDC role (no static
 credentials), pull the published artifact by its digest-pinned reference while
-verifying the expected workflow, convert the `.raw` into an EBS snapshot using an
-ephemeral Terraform-managed builder instance, and register the AMI with
-`--boot-mode uefi --tpm-support v2.0`. The job SHALL tear down the builder instance in
-all cases, including failure.
+verifying the expected workflow, convert the `.raw` into an EBS snapshot by uploading it
+through the EBS direct APIs with `coldsnap` running on the runner (no builder instance),
+and register the AMI with `--boot-mode uefi --tpm-support v2.0`. The block-level upload
+SHALL NOT interpret or modify the image, so the measured-boot layout (and thus PCR4) is
+preserved.
 
 #### Scenario: Artifact becomes a registered attestable AMI
 
 - **WHEN** the AMI job runs after a successful build on `main` or manual dispatch
 - **THEN** AWS access is obtained via the OIDC role with no static credentials
 - **AND** the artifact is pulled by digest and the expected workflow is verified
+- **AND** `coldsnap` uploads the `.raw` to an EBS snapshot on the runner without provisioning any builder instance
 - **AND** the AMI is registered with UEFI boot mode and NitroTPM v2.0 support and its id is emitted
 
-#### Scenario: Builder instance is always cleaned up
+#### Scenario: No builder instance to leak
 
-- **WHEN** the AMI job finishes, whether it succeeded or failed
-- **THEN** `terraform destroy` runs to remove the ephemeral builder instance
-- **AND** a failure to destroy is surfaced as a warning for manual cleanup
+- **WHEN** the AMI job runs
+- **THEN** no EC2 builder instance is provisioned and no Terraform teardown is required
+- **AND** the OIDC role is scoped to the EBS direct APIs and `ec2:RegisterImage` only
 
 ### Requirement: CI supply-chain hardening
 

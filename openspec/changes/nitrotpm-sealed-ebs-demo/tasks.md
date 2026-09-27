@@ -51,15 +51,15 @@
 - [ ] 8.5 Install ORAS (pinned version + SHA-256 checksum verify) and push raw + measurements to GHCR with PCR4/PCR12 annotations; output a digest-pinned artifact reference
 - [ ] 8.6 Generate SLSA build-provenance attestation (`actions/attest`, push-to-registry) for the pushed digest
 
-## 9. CI: AMI build job (Path A)
+## 9. CI: AMI build job (runner-side coldsnap, no builder instance)
 
-- [ ] 9.1 Add `terraform/build-ami/` for an ephemeral **stock AL2023** builder instance (right-sized) + its instance profile (EBS/snapshot/register + `ssm:PutParameter` + GHCR read); this instance is NOT our attestable AMI, so no zero-access rule applies to it
-- [ ] 9.2 Add `scripts/build-ami.py` (runs ON the builder via `user-data`, not on the runner — the volume can only attach to the instance): pull the OCI artifact by digest, verify the expected workflow, `dd` raw -> attached volume -> `create-snapshot` -> `register-image --boot-mode uefi --tpm-support v2.0`, write the AMI id to an SSM parameter (and `ami_build_result.json`)
-- [ ] 9.3 Add job `build-ami` (`needs: build-and-publish`, `main`/dispatch only): OIDC `configure-aws-credentials` with `vars.AWS_ROLE_ARN`, setup Terraform, `terraform apply` (launch builder with `build-ami.py` as `user-data`), poll the SSM parameter for the AMI id — no inbound SSH, no keypair
-- [ ] 9.4 `if: always()` cleanup: `terraform destroy`, warn on failure for manual cleanup; record the AMI id / `ami_build_result.json` in the job summary
+- [ ] 9.1 Add job `build-ami` (`needs: build-and-publish`, `main`/dispatch only): OIDC `configure-aws-credentials` with `vars.AWS_ROLE_ARN`; pull the OCI artifact by digest and `gh attestation verify` the expected workflow before using it
+- [ ] 9.2 Install `coldsnap` on the runner from a cached binary: `actions/cache` on `~/.cargo/bin/coldsnap` keyed `coldsnap-<os>-<pinned-version>`, `cargo install --locked --version <pinned>` only on cache miss (no prebuilt binary exists upstream)
+- [ ] 9.3 `coldsnap upload` the `.raw` -> EBS snapshot (EBS direct APIs, block-level, PCR4 preserved), wait for `snapshot_completed`, then `register-image --boot-mode uefi --tpm-support v2.0` (`RootDeviceName=/dev/xvda`, `Architecture=x86_64`, `EnaSupport`, `hvm`, snapshot as the single block-device mapping); emit the AMI id and write `ami_build_result.json`
+- [ ] 9.4 (fallback, only if runner upload throughput is inadequate for the image size) in-region upload instance via instance profile + `user-data`, no inbound SSH/keypair — not built unless 9.3 proves too slow
 
 ## 10. CI: hardening + docs
 
-- [ ] 10.1 Pin every action by commit SHA; set least-privilege `permissions` per job (`build-and-publish`: packages/attestations/id-token write; `build-ami`: id-token write, packages read)
-- [ ] 10.2 Document required repo config: GHCR access, the AWS OIDC role (`AWS_ROLE_ARN`), region var; no static AWS keys, no SSH/debug build path
+- [ ] 10.1 Pin every action by commit SHA; set least-privilege `permissions` per job (`build-and-publish`: packages/attestations/id-token write; `build-ami`: id-token write, packages read) and scope the OIDC role to `ebs:StartSnapshot`/`PutSnapshotBlock`/`CompleteSnapshot` + `ec2:RegisterImage` + `ec2:DescribeSnapshots` (+ KMS grant if the snapshot is encrypted)
+- [ ] 10.2 Document required repo config: GHCR access, the AWS OIDC role (`AWS_ROLE_ARN`), region var; no static AWS keys, no SSH/debug build path, no builder instance
 - [ ] 10.3 Document the verify/pull instructions in the job summary (`gh attestation verify`, `oras pull`) and where the reference PCR4/PCR12 land
