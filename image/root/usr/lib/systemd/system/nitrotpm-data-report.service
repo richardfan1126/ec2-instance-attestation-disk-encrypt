@@ -1,0 +1,24 @@
+[Unit]
+Description=Print the NitroTPM-sealed data-volume boot report to the serial console
+Documentation=https://github.com/richardfan1126/ec2-instance-attestation-disk-encrypt
+# Purely diagnostic: run after the enroll/unlock unit has done its work so the
+# report reflects the final state. Ordered before multi-user.target so the
+# evidence is on the console by the time boot settles. Not a hard dependency of
+# the enroll unit -- if enroll fails, this still runs and reports the LOCKED
+# state, which is exactly what an operator watching the serial console needs.
+After=nitrotpm-data.service
+Wants=nitrotpm-data.service
+Before=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/nitrotpm-data-report.sh
+# Mirror the report to /dev/console (== ttyS0 per the kernel cmdline) as well as
+# the journal -- the serial console is the only diagnostic surface on this
+# zero-access image.
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

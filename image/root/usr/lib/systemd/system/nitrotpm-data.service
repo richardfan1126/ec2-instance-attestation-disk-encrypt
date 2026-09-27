@@ -15,6 +15,12 @@ ConditionPathExists=/dev/tpmrm0
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/sbin/nitrotpm-data-enroll.sh
+# The script's log() breadcrumbs go to stderr -> the journal. On a zero-access
+# image there is no shell to read the journal with, so mirror this unit's
+# output to /dev/console (== ttyS0, per the kernel cmdline console=ttyS0) too.
+# journal+console is the documented systemd value for "journal AND the console".
+StandardOutput=journal+console
+StandardError=journal+console
 
 [Install]
 WantedBy=multi-user.target

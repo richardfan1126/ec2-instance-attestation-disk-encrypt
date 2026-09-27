@@ -10,4 +10,8 @@ echo "enable set-hostname-imds.service" >> /usr/lib/systemd/system-preset/80-amz
 # baked in and enabled via preset.
 echo "enable nitrotpm-data.service" >> /usr/lib/systemd/system-preset/80-amzn-overrides.preset
 
-systemctl preset set-hostname-imds.service nitrotpm-data.service
+# Enable the read-only boot report (live PCR4/PCR12 + LUKS binding + mount
+# state to the serial console) the same way.
+echo "enable nitrotpm-data-report.service" >> /usr/lib/systemd/system-preset/80-amzn-overrides.preset
+
+systemctl preset set-hostname-imds.service nitrotpm-data.service nitrotpm-data-report.service

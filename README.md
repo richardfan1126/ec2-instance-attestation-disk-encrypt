@@ -26,8 +26,10 @@ image/
   test_nitrotpm_data.sh          self-check for the data-volume discovery logic
   root/                          baked overlay copied into the image
     mnt/data/                    baked mountpoint (read-only root can't mkdir at runtime)
-    usr/lib/systemd/system/nitrotpm-data.service
+    usr/lib/systemd/system/nitrotpm-data.service         enroll/unlock unit (output -> serial)
+    usr/lib/systemd/system/nitrotpm-data-report.service  read-only boot report -> serial
     usr/local/sbin/nitrotpm-data-enroll.sh    enroll + unlock (runs every boot)
+    usr/local/sbin/nitrotpm-data-report.sh    prints PCR4/12 + LUKS binding + mount to serial
 .github/
   docker/Dockerfile.kiwi-builder privileged KIWI build environment
   scripts/build-kiwi-image.sh    kiwi-ng system build -> .raw + pcr_measurements.json
@@ -93,8 +95,20 @@ changes the root filesystem, the dm-verity roothash, and thus PCR4.
 ## Launch and confirm NitroTPM
 
 Launch the AMI on a NitroTPM-capable type with a second EBS volume attached.
-There is no SSH/SSM on this image, so use the **EC2 serial console** to observe
-boot. NitroTPM is present when `/dev/tpmrm0` exists in-guest.
+
+There is **no interactive access** on this image — no sshd, no SSM, no
+ec2-instance-connect, and the kernel cmdline sets `systemd.getty_auto=false`
+(no login prompt) and `rd.shell=0` (no rescue shell). The **EC2 serial
+console** is therefore **output-only**: you *watch* boot on it, you cannot type
+commands. You cannot add a shell either — doing so changes the root filesystem,
+the dm-verity roothash, and thus PCR4, and the TPM then refuses to release the
+key. That is the point: the console being present is harmless because nothing
+listens on it, and you can have a shell or the key, never both.
+
+So verification is done from what the box *emits* (the baked boot report on the
+serial console, below) and from *outside* the box (the off-box tests under
+[Manual verification](#manual-verification-on-a-real-instance)) — not from an
+in-guest shell.
 
 ## Demo walkthrough
 
@@ -107,13 +121,33 @@ boot. NitroTPM is present when `/dev/tpmrm0` exists in-guest.
    NitroTPM releases the key and the volume auto-unlocks and mounts at
    `/mnt/data` with zero interaction.
 
-Verify on the running instance (via serial console):
+Verify by **watching the EC2 serial console** during boot — there is no shell
+to run commands in (see [Launch and confirm NitroTPM](#launch-and-confirm-nitrotpm)).
+Two units write their output to the console (`StandardOutput=journal+console`,
+so `/dev/console` == `ttyS0` per the kernel cmdline):
 
-```bash
-journalctl -u nitrotpm-data.service      # look for "OK: ... unlocked and mounted"
-findmnt /mnt/data                         # mounted from /dev/mapper/data
-cryptsetup luksDump /dev/<data-dev> | grep -A3 tpm2   # only the TPM2 token, no password slot
-```
+- `nitrotpm-data.service` prints its `nitrotpm-data:` breadcrumb — on success
+  `OK: /dev/… unlocked and mounted at /mnt/data`, otherwise a `REFUSED: …`
+  line naming exactly why the volume was left locked.
+- `nitrotpm-data-report.service` then prints a read-only boot report:
+
+  ```
+  nitrotpm-data-report: live PCR4 (sha384): <hex>
+  nitrotpm-data-report: live PCR12 (sha384): <hex>
+  nitrotpm-data-report:   Keyslots:
+  nitrotpm-data-report:     1: luks2                     # the TPM keyslot ...
+  nitrotpm-data-report:   Tokens:
+  nitrotpm-data-report:     0: systemd-tpm2              # ... bound by this token
+  nitrotpm-data-report:           tpm2-hash-pcrs:   4+12 #     to PCR4 + PCR12
+  nitrotpm-data-report:           tpm2-pcr-bank:    sha384
+  nitrotpm-data-report:   mount: /mnt/data /dev/mapper/data ext4
+  nitrotpm-data-report: attestation: nitro-tpm-attest produced a signed document (… bytes); validate it off-box
+  ```
+
+  There is **only one keyslot** and it is bound by the `systemd-tpm2` token — the
+  bootstrap password slot was wiped at enroll. Compare the printed **live PCR4 /
+  PCR12** against the build-time `pcr_measurements.json` (hex is case-insensitive)
+  to confirm the instance measured to the AMI that was built.
 
 ### Reference PCRs are a verification anchor, not a seal input
 
@@ -151,12 +185,49 @@ supported.
 
 ## Manual verification (on a real instance)
 
-These require a live NitroTPM instance and are not automated here:
+These require a live NitroTPM instance and are not automated here. The first two
+are observed on the serial console (no shell needed); the rest are proven from
+outside the box.
 
-- **Reboot survival:** reboot the instance; confirm `/mnt/data` is still mounted
-  and `journalctl -u nitrotpm-data.service` shows a clean unlock.
-- **No AWS/network dependency:** detach the network / remove any credentials and
-  reboot; the volume still unlocks from NitroTPM alone.
+- **Reboot survival (the core positive test):** reboot the instance and watch the
+  serial console. The same AMI reproduces the same PCR4 + PCR12, so the TPM
+  releases the key with zero interaction — you see `nitrotpm-data.service` reach
+  `OK: … unlocked and mounted` and the boot report show `/mnt/data` mounted
+  again. (Write a file to `/mnt/data` before the reboot if you want end-to-end
+  proof the *data* survived; you'll read it back off-box in the next test.)
+- **Seal integrity (negative test) — proves the data is actually protected:**
+  stop the instance, detach the data volume, attach it to an ordinary instance,
+  and try to open it:
+
+  ```bash
+  cryptsetup luksDump /dev/<dev>     # a systemd-tpm2 token, NO password keyslot
+  cryptsetup open /dev/<dev> test    # MUST fail: no passphrase, and this box's
+                                     # NitroTPM cannot unseal the other instance's key
+  ```
+
+  It cannot unlock — the sealed slot needs the original instance's NitroTPM state
+  and matching PCRs, and there is no recovery passphrase. This is the test that
+  demonstrates the protection holds. It needs no shell on the target instance.
+- **No AWS/network dependency:** detach the ENI / remove any credentials and
+  reboot; the boot report still shows a clean unlock — the key comes from
+  NitroTPM alone, never KMS or the network.
+- **Stop/start is unrecoverable (expected, not a bug):** stop/start (not reboot)
+  the instance and watch the serial console — `nitrotpm-data.service` now prints
+  `REFUSED: TPM unseal failed … (NitroTPM state lost on stop/start)`. Confirming
+  this failure confirms the documented behavior; there is no recovery keyslot and
+  the data is gone by design.
+
+For deep interactive checks (`cryptsetup`/PCR poking by hand) build a **debug
+variant** of the image with a getty or sshd added — validate the *logic* there,
+accepting it has a **different PCR4** and is not the image you ship. The
+production image is verified by the serial-console observations above plus the
+off-box negative test.
+
+> **Note:** the baked boot report (`nitrotpm-data-report.service`) is read-only
+> and creates no inbound access, but adding it to the image is itself a change,
+> so the built AMI has a **new reference PCR4** — the CI pipeline regenerates
+> `pcr_measurements.json` from the UKI on every build, so the image stays
+> self-consistent (it still matches *its own* measurements).
 
 ## CI pipeline
 
