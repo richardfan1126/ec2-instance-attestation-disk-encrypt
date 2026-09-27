@@ -1,0 +1,20 @@
+[Unit]
+Description=Enroll and unlock the NitroTPM-sealed LUKS data volume at /mnt/data
+Documentation=https://github.com/richardfan1126/ec2-instance-attestation-disk-encrypt
+# Order after the TPM resource-manager device and after udev has populated
+# /sys so NVMe namespaces are enumerable. Run before the box is "ready" so a
+# dependent workload can order After=nitrotpm-data.service and find /mnt/data
+# mounted. There is no .mount unit (the mount is imperative inside the script),
+# so RequiresMountsFor=/mnt/data would NOT help a consumer -- order on this unit.
+After=dev-tpmrm0.device systemd-udevd.service
+Wants=dev-tpmrm0.device
+Before=multi-user.target
+ConditionPathExists=/dev/tpmrm0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/nitrotpm-data-enroll.sh
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+# KIWI build outputs
+build-output/
+*.raw
+*.raw.sha256
+*.packages
+*.verified
+kiwi.result*
+pcr_measurements.json
+
+# AMI build result
+ami_build_result.json

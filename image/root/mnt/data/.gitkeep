@@ -1,0 +1,5 @@
+# Baked mountpoint for the NitroTPM-sealed LUKS data volume.
+# The root filesystem is read-only (erofs) with an ephemeral overlay, so this
+# directory must exist in the image at build time; it cannot be created
+# persistently at runtime. The data volume is mounted over it by
+# nitrotpm-data.service, hiding this file.

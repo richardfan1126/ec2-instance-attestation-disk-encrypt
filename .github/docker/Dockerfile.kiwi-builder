@@ -1,0 +1,28 @@
+# Privileged KIWI-NG build environment for the AL2023 attestable image.
+#
+# KIWI needs loop devices and mount, so the container is run --privileged by the
+# workflow. AL2023 is the base so that `nitro-tpm-pcr-compute` (from
+# aws-nitro-tpm-tools) and the AL2023 package set resolve the same way they will
+# inside the image.
+#
+# NOTE (toolchain calibration knob): the exact host-side dependency set KIWI
+# needs can drift with the KIWI version. If a build fails resolving a host tool,
+# add it here rather than in the image recipe. `kiwi-systemdeps` pulls the bulk
+# of them; the explicit packages below cover the erofs/verity/UEFI path this
+# recipe exercises.
+FROM amazonlinux:2023
+
+RUN dnf -y install --setopt=install_weak_deps=False \
+        python3 python3-pip \
+        kiwi-systemdeps \
+        xfsprogs erofs-utils squashfs-tools \
+        dosfstools e2fsprogs gdisk parted \
+        cryptsetup veritysetup \
+        dracut systemd-udev systemd-boot \
+        tar gzip xz which findutils util-linux \
+    && dnf clean all
+
+# Pin KIWI to a known-good release line; bump deliberately.
+RUN pip3 install --no-cache-dir 'kiwi>=10,<11'
+
+ENTRYPOINT ["/bin/bash"]

@@ -1,65 +1,65 @@
 ## 1. Project scaffolding
 
-- [ ] 1.1 Create repo layout: `image/` (KIWI recipe), `image/root/` (baked overlay), `README.md`, `LICENSE`/`.gitignore`
-- [ ] 1.2 Document prerequisites in README: an AL2023 builder with `kiwi-ng`, a NitroTPM-capable instance type, `--boot-mode uefi --tpm-support v2.0`
+- [x] 1.1 Create repo layout: `image/` (KIWI recipe), `image/root/` (baked overlay), `README.md`, `LICENSE`/`.gitignore`
+- [x] 1.2 Document prerequisites in README: an AL2023 builder with `kiwi-ng`, a NitroTPM-capable instance type, `--boot-mode uefi --tpm-support v2.0`
 
 ## 2. KIWI-NG attestable image recipe
 
-- [ ] 2.1 Fork AWS `attestable-image-example` `appliance.kiwi`: systemd-boot UKI, `verity_blocks="all"` panic-on-corruption, erofs `overlayroot` with `overlayroot_write_partition="false"`, ignore cloud-init / openssh-server / amazon-ssm-agent / ec2-instance-connect
-- [ ] 2.2 Ensure image packages include `cryptsetup`, `veritysetup`, `aws-nitro-tpm-tools`, `systemd-boot`, `dracut-kiwi-verity`, `dracut-kiwi-overlay` (data-volume discovery needs no extra package — no `amazon-ec2-utils` / udev rule required for the exclusion approach)
-- [ ] 2.3 Carry over `config.sh` (preset-enable our enrollment unit, cloud-init replacement pattern) and `edit_boot_install.sh` (build-time `nitro-tpm-pcr-compute` -> `pcr_measurements.json`) and `add-gpg-key.sh`
-- [ ] 2.4 Verify `nitro-tpm-pcr-compute --version` on the builder is >= 1.1.0 (PCR12 support; latest 1.1.2) so the build emits the PCR12 reference (default all-zeros), not just PCR4/PCR7
+- [x] 2.1 Fork AWS `attestable-image-example` `appliance.kiwi`: systemd-boot UKI, `verity_blocks="all"` panic-on-corruption, erofs `overlayroot` with `overlayroot_write_partition="false"`, ignore cloud-init / openssh-server / amazon-ssm-agent / ec2-instance-connect
+- [x] 2.2 Ensure image packages include `cryptsetup`, `veritysetup`, `aws-nitro-tpm-tools`, `systemd-boot`, `dracut-kiwi-verity`, `dracut-kiwi-overlay` (data-volume discovery needs no extra package — no `amazon-ec2-utils` / udev rule required for the exclusion approach)
+- [x] 2.3 Carry over `config.sh` (preset-enable our enrollment unit, cloud-init replacement pattern) and `edit_boot_install.sh` (build-time `nitro-tpm-pcr-compute` -> `pcr_measurements.json`) and `add-gpg-key.sh`
+- [ ] 2.4 Verify `nitro-tpm-pcr-compute --version` on the builder is >= 1.1.0 (PCR12 support; latest 1.1.2) so the build emits the PCR12 reference (default all-zeros), not just PCR4/PCR7  <!-- live builder check; mechanized by the CI extract step (8.4) which fails if PCR12 is absent, and documented as a README prerequisite -->
 
 ## 3. Baked enrollment unit + mountpoint
 
-- [ ] 3.1 Bake mountpoint dir `image/root/mnt/data` into the overlay
-- [ ] 3.2 Add `image/root/usr/lib/systemd/system/nitrotpm-data.service` (oneshot, `RemainAfterExit`, `After=dev-tpmrm0.device systemd-udevd.service`, `Before=multi-user.target`; mount is imperative in-unit, so any future `/mnt/data` consumer must order `After=nitrotpm-data.service`)
-- [ ] 3.3 Enable the unit via `systemctl preset` in `config.sh`
+- [x] 3.1 Bake mountpoint dir `image/root/mnt/data` into the overlay
+- [x] 3.2 Add `image/root/usr/lib/systemd/system/nitrotpm-data.service` (oneshot, `RemainAfterExit`, `After=dev-tpmrm0.device systemd-udevd.service`, `Before=multi-user.target`; mount is imperative in-unit, so any future `/mnt/data` consumer must order `After=nitrotpm-data.service`)
+- [x] 3.3 Enable the unit via `systemctl preset` in `config.sh`
 
 ## 4. Enrollment + unlock script
 
-- [ ] 4.1 Write the enroll/unlock script (baked into `image/root/`): discover the data volume by exclusion — the single `Amazon Elastic Block Store` NVMe namespace that is **not in use by the running system** (not mounted, no holders, not in root's DM / verity / overlay chain), confirmed partition-less; no IMDS/AWS call, no baked volume id, enumeration-order-invariant
-- [ ] 4.1a Gate discovery on a **bounded, stable** candidate count (count unchanged across a short quiet window, not the first sighting); require exactly one — refuse and mount nothing on zero (no volume) or >=2 (ambiguous), biased toward waiting; write a loud structured breadcrumb to the journal on refusal (the only diagnostic surface on a zero-access image)
-- [ ] 4.2 First-boot branch (`! cryptsetup isLuks`): `luksFormat` with a random bootstrap key, enroll TPM2 keyslot sealed to PCR4 + PCR12 via `systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=4+12` (`+` is the confirmed separator), remove the bootstrap key
-- [ ] 4.3 Every-boot: `cryptsetup open` (TPM unseal); guard `mkfs` with a post-open `blkid` has-filesystem check (create the fs only when absent, so a provisioned volume is never re-made); mount at `/mnt/data`; exit cleanly (leave volume locked) and log a breadcrumb if unseal fails
-- [ ] 4.4 Confirm idempotency: on later boots the `isLuks` guard skips format/enroll and only opens+mounts
+- [x] 4.1 Write the enroll/unlock script (baked into `image/root/`): discover the data volume by exclusion — the single `Amazon Elastic Block Store` NVMe namespace that is **not in use by the running system** (not mounted, no holders, not in root's DM / verity / overlay chain), confirmed partition-less; no IMDS/AWS call, no baked volume id, enumeration-order-invariant
+- [x] 4.1a Gate discovery on a **bounded, stable** candidate count (count unchanged across a short quiet window, not the first sighting); require exactly one — refuse and mount nothing on zero (no volume) or >=2 (ambiguous), biased toward waiting; write a loud structured breadcrumb to the journal on refusal (the only diagnostic surface on a zero-access image)
+- [x] 4.2 First-boot branch (`! cryptsetup isLuks`): `luksFormat` with a random bootstrap key, enroll TPM2 keyslot sealed to PCR4 + PCR12 via `systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=4+12` (`+` is the confirmed separator), remove the bootstrap key
+- [x] 4.3 Every-boot: `cryptsetup open` (TPM unseal); guard `mkfs` with a post-open `blkid` has-filesystem check (create the fs only when absent, so a provisioned volume is never re-made); mount at `/mnt/data`; exit cleanly (leave volume locked) and log a breadcrumb if unseal fails
+- [x] 4.4 Confirm idempotency: on later boots the `isLuks` guard skips format/enroll and only opens+mounts
 
 ## 5. Build, register, launch
 
-- [ ] 5.1 Document the `kiwi-ng system build` command and capturing `pcr_measurements.json` (reference PCR4/PCR12)
-- [ ] 5.2 Document converting the raw image to an AMI and `aws ec2 register-image --boot-mode uefi --tpm-support v2.0`
-- [ ] 5.3 Document launching the instance on a NitroTPM-capable type with a second EBS data volume attached; confirm NitroTPM in-guest (`/dev/tpmrm0`)
+- [x] 5.1 Document the `kiwi-ng system build` command and capturing `pcr_measurements.json` (reference PCR4/PCR12)
+- [x] 5.2 Document converting the raw image to an AMI and `aws ec2 register-image --boot-mode uefi --tpm-support v2.0`
+- [x] 5.3 Document launching the instance on a NitroTPM-capable type with a second EBS data volume attached; confirm NitroTPM in-guest (`/dev/tpmrm0`)
 
 ## 6. Demo walkthrough (README)
 
-- [ ] 6.1 Document step: launch -> first boot enrolls -> reboot -> volume auto-unlocks and mounts at `/mnt/data` (with verification commands)
-- [ ] 6.1a Document that the reference `pcr_measurements.json` is a verification anchor (confirm the running instance's live PCR4 matches the built AMI), not an input to the seal; first-boot PCR4 trust rests on immutability + dm-verity
-- [ ] 6.2 Note the PCR4-only bypass PCR12 defends against (AWS GHSA-xrv8-2pf5-f3q7): an injected cmdline that disables integrity while keeping PCR4 constant — explaining why the seal binds PCR4 + PCR12 (no live tamper demo is shipped)
-- [ ] 6.3 Document the reboot-only boundary and the explicit warning: do NOT stop/start (fresh NitroTPM state on stop/start leaves the sealed key unrecoverable — not a PCR change; PCR4/PCR12 recompute identically. Reboot keeps TPM state and PCRs)
+- [x] 6.1 Document step: launch -> first boot enrolls -> reboot -> volume auto-unlocks and mounts at `/mnt/data` (with verification commands)
+- [x] 6.1a Document that the reference `pcr_measurements.json` is a verification anchor (confirm the running instance's live PCR4 matches the built AMI), not an input to the seal; first-boot PCR4 trust rests on immutability + dm-verity
+- [x] 6.2 Note the PCR4-only bypass PCR12 defends against (AWS GHSA-xrv8-2pf5-f3q7): an injected cmdline that disables integrity while keeping PCR4 constant — explaining why the seal binds PCR4 + PCR12 (no live tamper demo is shipped)
+- [x] 6.3 Document the reboot-only boundary and the explicit warning: do NOT stop/start (fresh NitroTPM state on stop/start leaves the sealed key unrecoverable — not a PCR change; PCR4/PCR12 recompute identically. Reboot keeps TPM state and PCRs)
 
 ## 7. Verification
 
-- [ ] 7.1 Manual test on a real instance: reboot survives unlock (happy path), `/mnt/data` mounted
-- [ ] 7.2 Manual test: unlock works with the network detached / no AWS credentials (proves no KMS/IAM dependency)
+- [ ] 7.1 Manual test on a real instance: reboot survives unlock (happy path), `/mnt/data` mounted  <!-- requires a live NitroTPM instance; documented in README "Manual verification" -->
+- [ ] 7.2 Manual test: unlock works with the network detached / no AWS credentials (proves no KMS/IAM dependency)  <!-- requires a live NitroTPM instance; documented in README "Manual verification" -->
 
 ## 8. CI: image build + publish job
 
-- [ ] 8.1 Add `.github/docker/Dockerfile.kiwi-builder` (privileged KIWI-NG build env)
-- [ ] 8.2 Add `.github/scripts/build-kiwi-image.sh` invoking `kiwi-ng system build` -> `build-output/*.raw` + `pcr_measurements.json`
-- [ ] 8.3 Add `.github/workflows/build-attestable-image.yml` job `build-and-publish` (ubuntu-24.04): checkout, buildx, build kiwi-builder, run build script, upload raw + measurements artifact
-- [ ] 8.4 Extract step: read PCR4 and PCR12 from `pcr_measurements.json`, fail if PCR12 is missing/null, write to job outputs + step summary
-- [ ] 8.5 Install ORAS (pinned version + SHA-256 checksum verify) and push raw + measurements to GHCR with PCR4/PCR12 annotations; output a digest-pinned artifact reference
-- [ ] 8.6 Generate SLSA build-provenance attestation (`actions/attest`, push-to-registry) for the pushed digest
+- [x] 8.1 Add `.github/docker/Dockerfile.kiwi-builder` (privileged KIWI-NG build env)
+- [x] 8.2 Add `.github/scripts/build-kiwi-image.sh` invoking `kiwi-ng system build` -> `build-output/*.raw` + `pcr_measurements.json`
+- [x] 8.3 Add `.github/workflows/build-attestable-image.yml` job `build-and-publish` (ubuntu-24.04): checkout, buildx, build kiwi-builder, run build script, upload raw + measurements artifact
+- [x] 8.4 Extract step: read PCR4 and PCR12 from `pcr_measurements.json`, fail if PCR12 is missing/null, write to job outputs + step summary
+- [x] 8.5 Install ORAS (pinned version + SHA-256 checksum verify) and push raw + measurements to GHCR with PCR4/PCR12 annotations; output a digest-pinned artifact reference
+- [x] 8.6 Generate SLSA build-provenance attestation (`actions/attest`, push-to-registry) for the pushed digest
 
 ## 9. CI: AMI build job (runner-side coldsnap, no builder instance)
 
-- [ ] 9.1 Add job `build-ami` (`needs: build-and-publish`, `main`/dispatch only): OIDC `configure-aws-credentials` with `vars.AWS_ROLE_ARN`; pull the OCI artifact by digest and `gh attestation verify` the expected workflow before using it
-- [ ] 9.2 Install `coldsnap` on the runner from a cached binary: `actions/cache` on `~/.cargo/bin/coldsnap` keyed `coldsnap-<os>-<pinned-version>`, `cargo install --locked --version <pinned>` only on cache miss (no prebuilt binary exists upstream)
-- [ ] 9.3 `coldsnap upload` the `.raw` -> EBS snapshot (EBS direct APIs, block-level, PCR4 preserved), wait for `snapshot_completed`, then `register-image --boot-mode uefi --tpm-support v2.0` (`RootDeviceName=/dev/xvda`, `Architecture=x86_64`, `EnaSupport`, `hvm`, snapshot as the single block-device mapping); emit the AMI id and write `ami_build_result.json`
-- [ ] 9.4 (fallback, only if runner upload throughput is inadequate for the image size) in-region upload instance via instance profile + `user-data`, no inbound SSH/keypair — not built unless 9.3 proves too slow
+- [x] 9.1 Add job `build-ami` (`needs: build-and-publish`, `main`/dispatch only): OIDC `configure-aws-credentials` with `vars.AWS_ROLE_ARN`; pull the OCI artifact by digest and `gh attestation verify` the expected workflow before using it
+- [x] 9.2 Install `coldsnap` on the runner from a cached binary: `actions/cache` on `~/.cargo/bin/coldsnap` keyed `coldsnap-<os>-<pinned-version>`, `cargo install --locked --version <pinned>` only on cache miss (no prebuilt binary exists upstream)
+- [x] 9.3 `coldsnap upload` the `.raw` -> EBS snapshot (EBS direct APIs, block-level, PCR4 preserved), wait for `snapshot_completed`, then `register-image --boot-mode uefi --tpm-support v2.0` (`RootDeviceName=/dev/xvda`, `Architecture=x86_64`, `EnaSupport`, `hvm`, snapshot as the single block-device mapping); emit the AMI id and write `ami_build_result.json`
+- [ ] 9.4 (fallback, only if runner upload throughput is inadequate for the image size) in-region upload instance via instance profile + `user-data`, no inbound SSH/keypair — not built unless 9.3 proves too slow  <!-- intentionally not built (YAGNI, per the task's own condition) -->
 
 ## 10. CI: hardening + docs
 
-- [ ] 10.1 Pin every action by commit SHA; set least-privilege `permissions` per job (`build-and-publish`: packages/attestations/id-token write; `build-ami`: id-token write, packages read) and scope the OIDC role to `ebs:StartSnapshot`/`PutSnapshotBlock`/`CompleteSnapshot` + `ec2:RegisterImage` + `ec2:DescribeSnapshots` (+ KMS grant if the snapshot is encrypted)
-- [ ] 10.2 Document required repo config: GHCR access, the AWS OIDC role (`AWS_ROLE_ARN`), region var; no static AWS keys, no SSH/debug build path, no builder instance
-- [ ] 10.3 Document the verify/pull instructions in the job summary (`gh attestation verify`, `oras pull`) and where the reference PCR4/PCR12 land
+- [x] 10.1 Pin every action by commit SHA; set least-privilege `permissions` per job (`build-and-publish`: packages/attestations/id-token write; `build-ami`: id-token write, packages read) and scope the OIDC role to `ebs:StartSnapshot`/`PutSnapshotBlock`/`CompleteSnapshot` + `ec2:RegisterImage` + `ec2:DescribeSnapshots` (+ KMS grant if the snapshot is encrypted)
+- [x] 10.2 Document required repo config: GHCR access, the AWS OIDC role (`AWS_ROLE_ARN`), region var; no static AWS keys, no SSH/debug build path, no builder instance
+- [x] 10.3 Document the verify/pull instructions in the job summary (`gh attestation verify`, `oras pull`) and where the reference PCR4/PCR12 land

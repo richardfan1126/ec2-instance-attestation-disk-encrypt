@@ -1,0 +1,223 @@
+name: build-attestable-image
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  # ORAS is pinned by version + SHA-256 (verified on download).
+  ORAS_VERSION: "1.2.0"
+  ORAS_SHA256: "5b3f1cbb86d869eee68120b9b45b9be983f3738442f87ee5f06b00edd0bab336"
+  # coldsnap ships no prebuilt binaries; installed from source and cached by version.
+  COLDSNAP_VERSION: "0.12.0"
+  # GHCR OCI artifact holding the raw image + reference measurements.
+  ARTIFACT_REPO: "ghcr.io/${{ github.repository }}/attestable-raw"
+  RAW_MEDIA_TYPE: "application/vnd.nitrotpm.attestable-raw.image.v1+raw"
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      artifact-ref: ${{ steps.push.outputs.artifact-ref }}
+      digest: ${{ steps.push.outputs.digest }}
+      pcr4: ${{ steps.pcr.outputs.pcr4 }}
+      pcr12: ${{ steps.pcr.outputs.pcr12 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@c47758b77c9736f4b2ef4073d4d51994fabfe349 # v3.7.1
+
+      - name: Build the privileged KIWI builder image
+        run: |
+          docker build \
+            -f .github/docker/Dockerfile.kiwi-builder \
+            -t kiwi-builder:local \
+            .github/docker
+
+      - name: Build the attestable .raw image
+        run: |
+          docker run --rm --privileged \
+            -v "$PWD:/work" -w /work \
+            kiwi-builder:local \
+            .github/scripts/build-kiwi-image.sh image build-output
+
+      - name: Extract reference PCR4 + PCR12 (fail if PCR12 missing)
+        id: pcr
+        run: |
+          f=build-output/pcr_measurements.json
+          pcr4=$(jq -r '.Measurements.PCR4 // empty' "$f")
+          pcr12=$(jq -r '.Measurements.PCR12 // empty' "$f")
+          if [ -z "$pcr4" ]; then
+            echo "::error::PCR4 missing from $f"; exit 1
+          fi
+          if [ -z "$pcr12" ]; then
+            echo "::error::PCR12 missing from $f -- aws-nitro-tpm-tools must be >= 1.1.0"; exit 1
+          fi
+          echo "pcr4=$pcr4" >> "$GITHUB_OUTPUT"
+          echo "pcr12=$pcr12" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Reference PCR measurements"
+            echo "| PCR | Value |"
+            echo "| --- | --- |"
+            echo "| PCR4 | \`$pcr4\` |"
+            echo "| PCR12 | \`$pcr12\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload raw + measurements as a workflow artifact
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: attestable-raw
+          path: |
+            build-output/*.raw
+            build-output/pcr_measurements.json
+          if-no-files-found: error
+
+      - name: Install ORAS (pinned + checksum verified)
+        run: |
+          curl -fsSL -o oras.tar.gz \
+            "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz"
+          echo "${ORAS_SHA256}  oras.tar.gz" | sha256sum -c -
+          tar -xzf oras.tar.gz oras
+          sudo install -m 0755 oras /usr/local/bin/oras
+          oras version
+
+      - name: Log in to GHCR
+        run: echo "${{ github.token }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push the OCI artifact (digest-pinned) with PCR annotations
+        id: push
+        run: |
+          raw=$(find build-output -maxdepth 1 -name '*.raw' | head -n1)
+          tag="${ARTIFACT_REPO}:${{ github.sha }}"
+          oras push "$tag" \
+            --annotation "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --annotation "org.opencontainers.image.revision=${{ github.sha }}" \
+            --annotation "dev.nitrotpm.pcr4=${{ steps.pcr.outputs.pcr4 }}" \
+            --annotation "dev.nitrotpm.pcr12=${{ steps.pcr.outputs.pcr12 }}" \
+            "${raw}:${RAW_MEDIA_TYPE}" \
+            "build-output/pcr_measurements.json:application/json" \
+            | tee push.log
+          digest=$(grep -oE 'sha256:[0-9a-f]{64}' push.log | head -n1)
+          if [ -z "$digest" ]; then echo "::error::could not parse pushed digest"; exit 1; fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "artifact-ref=${ARTIFACT_REPO}@${digest}" >> "$GITHUB_OUTPUT"
+          echo "Artifact: \`${ARTIFACT_REPO}@${digest}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Generate SLSA build provenance for the pushed artifact
+        uses: actions/attest-build-provenance@ef244123eb79f2f7a7e75d99086184180e6d0018 # v1.4.4
+        with:
+          subject-name: ${{ env.ARTIFACT_REPO }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+  build-ami:
+    needs: build-and-publish
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Install ORAS (pinned + checksum verified)
+        run: |
+          curl -fsSL -o oras.tar.gz \
+            "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz"
+          echo "${ORAS_SHA256}  oras.tar.gz" | sha256sum -c -
+          tar -xzf oras.tar.gz oras
+          sudo install -m 0755 oras /usr/local/bin/oras
+
+      - name: Log in to GHCR
+        run: echo "${{ github.token }}" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Verify the artifact's build provenance (expected workflow)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh attestation verify "oci://${{ needs.build-and-publish.outputs.artifact-ref }}" \
+            --repo "${{ github.repository }}" \
+            --signer-workflow "${{ github.repository }}/.github/workflows/build-attestable-image.yml"
+
+      - name: Pull the raw image by digest
+        run: |
+          mkdir -p pulled
+          oras pull "${{ needs.build-and-publish.outputs.artifact-ref }}" -o pulled
+
+      - name: Restore cached coldsnap binary
+        id: coldsnap-cache
+        uses: actions/cache@6849a6489940f00c2f30c0fb92c6274307ccb58a # v4.1.2
+        with:
+          path: ~/.cargo/bin/coldsnap
+          key: coldsnap-${{ runner.os }}-${{ env.COLDSNAP_VERSION }}
+
+      - name: Install coldsnap (cache miss only)
+        if: steps.coldsnap-cache.outputs.cache-hit != 'true'
+        run: cargo install --locked --version "${COLDSNAP_VERSION}" coldsnap
+
+      - name: Upload raw to an EBS snapshot and register the AMI
+        id: ami
+        run: |
+          raw=$(find pulled -maxdepth 1 -name '*.raw' | head -n1)
+          if [ -z "$raw" ]; then echo "::error::no .raw pulled"; exit 1; fi
+
+          # coldsnap uploads block-for-block via the EBS direct APIs -- it never
+          # interprets the filesystem, so the erofs/dm-verity bytes and thus PCR4
+          # are preserved. --wait blocks until the snapshot completes.
+          snap=$("$HOME/.cargo/bin/coldsnap" upload --wait "$raw")
+          echo "snapshot: $snap"
+          aws ec2 wait snapshot-completed --snapshot-ids "$snap"
+
+          ami=$(aws ec2 register-image \
+            --name "al2023-nitrotpm-sealed-ebs-${{ github.sha }}" \
+            --description "AL2023 attestable AMI with NitroTPM-sealed LUKS data volume" \
+            --architecture x86_64 \
+            --boot-mode uefi \
+            --tpm-support v2.0 \
+            --virtualization-type hvm \
+            --ena-support \
+            --root-device-name /dev/xvda \
+            --block-device-mappings "DeviceName=/dev/xvda,Ebs={SnapshotId=$snap,VolumeType=gp3,DeleteOnTermination=true}" \
+            --query ImageId --output text)
+          echo "AMI: $ami"
+
+          jq -n \
+            --arg ami "$ami" \
+            --arg snap "$snap" \
+            --arg ref "${{ needs.build-and-publish.outputs.artifact-ref }}" \
+            --arg pcr4 "${{ needs.build-and-publish.outputs.pcr4 }}" \
+            --arg pcr12 "${{ needs.build-and-publish.outputs.pcr12 }}" \
+            '{ami_id:$ami, snapshot_id:$snap, artifact_ref:$ref, pcr4:$pcr4, pcr12:$pcr12}' \
+            > ami_build_result.json
+
+          {
+            echo "## Registered attestable AMI"
+            echo "- AMI: \`$ami\`"
+            echo "- Snapshot: \`$snap\`"
+            echo "- Artifact: \`${{ needs.build-and-publish.outputs.artifact-ref }}\`"
+            echo "- Reference PCR4: \`${{ needs.build-and-publish.outputs.pcr4 }}\`"
+            echo "- Reference PCR12: \`${{ needs.build-and-publish.outputs.pcr12 }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload AMI build result
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: ami-build-result
+          path: ami_build_result.json
+          if-no-files-found: error
