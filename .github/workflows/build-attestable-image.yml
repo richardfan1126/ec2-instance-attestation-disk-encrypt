@@ -179,7 +179,9 @@ jobs:
       - name: Upload raw to an EBS snapshot and register the AMI
         id: ami
         run: |
-          raw=$(find pulled -maxdepth 1 -name '*.raw' | head -n1)
+          # oras preserves the pushed file's path in its title, so the raw lands
+          # at pulled/build-output/*.raw -- descend rather than cap at depth 1.
+          raw=$(find pulled -name '*.raw' | head -n1)
           if [ -z "$raw" ]; then echo "::error::no .raw pulled"; exit 1; fi
 
           # coldsnap uploads block-for-block via the EBS direct APIs -- it never
