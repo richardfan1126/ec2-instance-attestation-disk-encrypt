@@ -8,7 +8,7 @@
 - [x] 2.1 Fork AWS `attestable-image-example` `appliance.kiwi`: systemd-boot UKI, `verity_blocks="all"` panic-on-corruption, erofs `overlayroot` with `overlayroot_write_partition="false"`, ignore cloud-init / openssh-server / amazon-ssm-agent / ec2-instance-connect
 - [x] 2.2 Ensure image packages include `cryptsetup`, `veritysetup`, `aws-nitro-tpm-tools`, `systemd-boot`, `dracut-kiwi-verity`, `dracut-kiwi-overlay` (data-volume discovery needs no extra package — no `amazon-ec2-utils` / udev rule required for the exclusion approach)
 - [x] 2.3 Carry over `config.sh` (preset-enable our enrollment unit, cloud-init replacement pattern) and `edit_boot_install.sh` (build-time `nitro-tpm-pcr-compute` -> `pcr_measurements.json`) and `add-gpg-key.sh`
-- [ ] 2.4 Verify `nitro-tpm-pcr-compute --version` on the builder is >= 1.1.0 (PCR12 support; latest 1.1.2) so the build emits the PCR12 reference (default all-zeros), not just PCR4/PCR7  <!-- live builder check; mechanized by the CI extract step (8.4) which fails if PCR12 is absent, and documented as a README prerequisite -->
+- [x] 2.4 Verify `nitro-tpm-pcr-compute --version` on the builder is >= 1.1.0 (PCR12 support; latest 1.1.2) so the build emits the PCR12 reference (default all-zeros), not just PCR4/PCR7  <!-- confirmed live: CI run 36298512626 built the image and the extract step (8.4) read a non-null PCR12, so the bundled tool is >= 1.1.0 -->
 
 ## 3. Baked enrollment unit + mountpoint
 
